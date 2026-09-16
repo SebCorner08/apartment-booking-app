@@ -59,9 +59,25 @@ function mergePricingSettings(current, updates) {
   return merged;
 }
 
+function validateRequiredTaxUpdate(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TypeError("Pricing settings payload must be an object");
+  }
+  if (
+    payload.mecklenburg_sales === undefined ||
+    payload.mecklenburg_sales === null ||
+    payload.mecklenburg_occupancy === undefined ||
+    payload.mecklenburg_occupancy === null
+  ) {
+    throw new TypeError("Missing tax rates");
+  }
+  return payload;
+}
+
 module.exports = {
   DEFAULT_PRICING,
   PRICING_FIELDS,
   normalizePricingRow,
   mergePricingSettings,
+  validateRequiredTaxUpdate,
 };

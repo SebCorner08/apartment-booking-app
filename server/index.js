@@ -16,6 +16,7 @@ const {
   DEFAULT_PRICING,
   normalizePricingRow,
   mergePricingSettings,
+  validateRequiredTaxUpdate,
 } = require("./pricing-settings.js");
 
 // Stripe se inicializa solo si hay clave real; en modo mock no se necesita.
@@ -921,15 +922,9 @@ app.get("/api/admin/tax-settings", checkAdminAuth, async (req, res) => {
 // conservan desde la última fila para que un cambio de impuestos nunca
 // restablezca silenciosamente la tarifa nocturna.
 app.post("/api/admin/tax-settings", checkAdminAuth, async (req, res) => {
-  if (
-    req.body.mecklenburg_sales === undefined ||
-    req.body.mecklenburg_occupancy === undefined
-  ) {
-    return res.status(400).json({ error: "Missing tax rates" });
-  }
-
   try {
-    const pricing = await savePricingSettings(req.body);
+    const updates = validateRequiredTaxUpdate(req.body);
+    const pricing = await savePricingSettings(updates);
     broadcastAdminUpdate();
     res.json({ message: "Pricing settings updated", ...pricing });
   } catch (err) {

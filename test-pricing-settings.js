@@ -5,6 +5,7 @@ const {
   DEFAULT_PRICING,
   normalizePricingRow,
   mergePricingSettings,
+  validateRequiredTaxUpdate,
 } = require("./server/pricing-settings");
 
 const current = {
@@ -42,6 +43,31 @@ assert.throws(
 assert.throws(
   () => mergePricingSettings(current, { nightly_rate: 0 }),
   /greater than zero/,
+);
+
+assert.throws(
+  () =>
+    validateRequiredTaxUpdate({
+      mecklenburg_sales: null,
+      mecklenburg_occupancy: 5,
+    }),
+  /Missing tax rates/,
+);
+assert.throws(
+  () =>
+    validateRequiredTaxUpdate({
+      mecklenburg_sales: 7.5,
+      mecklenburg_occupancy: null,
+    }),
+  /Missing tax rates/,
+);
+assert.throws(() => validateRequiredTaxUpdate(null), /payload must be an object/);
+assert.deepStrictEqual(
+  validateRequiredTaxUpdate({
+    mecklenburg_sales: 7.5,
+    mecklenburg_occupancy: 5,
+  }),
+  { mecklenburg_sales: 7.5, mecklenburg_occupancy: 5 },
 );
 
 console.log("Pricing configuration tests passed");
