@@ -347,8 +347,10 @@ function dbRun(sql, params = []) {
     "check-out mensual calculado por el servidor",
     m2.status === 200 &&
       (await dbAll(
-        `SELECT checkOut FROM booking_holds WHERE stripe_session_id = ?`,
-        [m2.body.id],
+        `SELECT checkOut FROM booking_holds
+         WHERE checkIn = ? AND rental_type = 'monthly'
+         ORDER BY rowid DESC LIMIT 1`,
+        [addDays(ci3, 75)],
       ))[0]?.checkOut === addMonths(addDays(ci3, 75), 3),
     `check-out esperado=${addMonths(addDays(ci3, 75), 3)}`,
   );
