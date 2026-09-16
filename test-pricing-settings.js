@@ -1,8 +1,13 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawnSync } = require("child_process");
 const {
   DEFAULT_PRICING,
+  buildDefaultPricing,
   normalizePricingRow,
   mergePricingSettings,
   validateRequiredTaxUpdate,
@@ -44,6 +49,63 @@ assert.throws(
   () => mergePricingSettings(current, { nightly_rate: 0 }),
   /greater than zero/,
 );
+
+assert.throws(
+  () => buildDefaultPricing({ MINIMUM_NIGHTS: "2.5" }),
+  /positive integer/,
+);
+assert.throws(
+  () => buildDefaultPricing({ NIGHTLY_RATE: "0" }),
+  /greater than zero/,
+);
+assert.throws(
+  () => buildDefaultPricing({ MONTHLY_RATE: "not-a-number" }),
+  /MONTHLY_RATE must be a finite number/,
+);
+assert.throws(
+  () => buildDefaultPricing({ CLEANING_FEE: "-1" }),
+  /cleaning_fee must be a non-negative finite number/,
+);
+assert.throws(
+  () => buildDefaultPricing({ TAX_MECKLENBURG_SALES: "-0.1" }),
+  /mecklenburg_sales must be a non-negative finite number/,
+);
+
+// database.js must reject invalid bootstrap configuration before SQLite can
+// create or seed the configured runtime file.
+const invalidBootstrapDir = fs.mkdtempSync(
+  path.join(os.tmpdir(), "pricing-bootstrap-invalid-"),
+);
+const invalidBootstrapDb = path.join(invalidBootstrapDir, "reservations.db");
+const invalidBootstrap = spawnSync(
+  process.execPath,
+  ["-e", "require('./server/database')"],
+  {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      RESERVATIONS_DB_PATH: invalidBootstrapDb,
+      MINIMUM_NIGHTS: "0",
+    },
+    encoding: "utf8",
+  },
+);
+assert.notStrictEqual(
+  invalidBootstrap.status,
+  0,
+  "invalid bootstrap pricing must stop database initialization",
+);
+assert.match(
+  `${invalidBootstrap.stdout}\n${invalidBootstrap.stderr}`,
+  /minimum_nights must be a positive integer/,
+);
+assert.strictEqual(
+  fs.existsSync(invalidBootstrapDb),
+  false,
+  "invalid bootstrap pricing must fail before creating the database file",
+);
+fs.rmSync(invalidBootstrapDir, { recursive: true, force: true });
 
 assert.throws(
   () =>
