@@ -1,7 +1,12 @@
 // Pruebas de seguridad de la API (contra MOCK_PAYMENTS, servidor en :3001)
 // Uso: node test-security.js
+const path = require("path");
+require("dotenv").config({
+  path: path.join(__dirname, "server", ".env"),
+  override: false,
+});
 const API = "http://localhost:3001";
-const fs = require("fs");
+const API_URL = process.env.TEST_API_URL || API;
 
 let passed = 0;
 let failed = 0;
@@ -17,7 +22,7 @@ function check(name, cond, detail = "") {
 }
 
 async function req(method, p, body, headers = {}) {
-  const r = await fetch(`${API}${p}`, {
+  const r = await fetch(`${API_URL}${p}`, {
     method,
     headers: {
       "Content-Type": "application/json",

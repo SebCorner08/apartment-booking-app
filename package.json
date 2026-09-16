@@ -7,6 +7,7 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "test:admin-session": "node test-admin-session-browser.js",
+    "test": "node test-repository-data-hygiene.js && node test-database-path.js && node test-stripe-webhook-durability.js && node test-runner.js",
     "test:persistence": "node test-database-path.js",
     "test:booking": "node test-booking-flow.js",
     "test:webhook": "node test-stripe-webhook-durability.js",
@@ -15,6 +16,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=22.9.0"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
@@ -23,7 +27,7 @@
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.2",
     "node-ical": "^0.27.1",
-    "sqlite3": "^5.1.7",
+    "sqlite3": "^6.0.1",
     "stripe": "^18.5.0",
     "ws": "^8.18.3"
   }
