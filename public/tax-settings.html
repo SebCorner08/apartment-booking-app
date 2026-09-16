@@ -487,6 +487,25 @@
               </div>
             </div>
 
+            <!-- Minimum Stay -->
+            <div class="form-group">
+              <label>Minimum Stay (nights)</label>
+              <div class="description">
+                Server-authoritative minimum for direct short-stay bookings.
+              </div>
+              <div class="input-group">
+                <input
+                  type="number"
+                  id="minimumNights"
+                  step="1"
+                  min="1"
+                  placeholder="Load from server"
+                  required
+                />
+                <span class="percent-sign">nights</span>
+              </div>
+            </div>
+
             <!-- ========== SHORT STAY PREVIEW ========== -->
             <div class="preview-section">
               <div class="preview-title">
@@ -620,6 +639,7 @@
       const salesInput = document.getElementById("mecklenburgSales");
       const occupancyInput = document.getElementById("mecklenburgOccupancy");
       const monthlyRateInput = document.getElementById("monthlyRate");
+      const minimumNightsInput = document.getElementById("minimumNights");
       const resetBtn = document.getElementById("resetBtn");
 
       const DEFAULT_RATES = {
@@ -735,6 +755,12 @@
               ? data.monthly_rate
               : DEFAULT_RATES.monthly_rate;
 
+          const minimumNights = Number(data.minimum_nights);
+          if (!Number.isInteger(minimumNights) || minimumNights < 1) {
+            throw new Error("Invalid minimum stay returned by server");
+          }
+          minimumNightsInput.value = minimumNights;
+
           updateTaxPreview();
           loading.style.display = "none";
         } catch (error) {
@@ -762,6 +788,11 @@
             return;
           }
 
+          const minimumNights = Number(minimumNightsInput.value);
+          if (!Number.isInteger(minimumNights) || minimumNights < 1) {
+            throw new Error("Minimum stay must be a positive integer");
+          }
+
           const response = await fetch(`${API_URL}/api/admin/tax-settings`, {
             method: "POST",
             headers: {
@@ -772,6 +803,7 @@
               mecklenburg_sales: parseFloat(salesInput.value),
               mecklenburg_occupancy: parseFloat(occupancyInput.value),
               monthly_rate: parseFloat(monthlyRateInput.value),
+              minimum_nights: minimumNights,
             }),
           });
 
