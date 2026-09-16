@@ -1,11 +1,72 @@
 // Pruebas obligatorias de los 3 puntos corregidos (contra MOCK_PAYMENTS)
-// Uso: node test-booking-flow.js  (requiere el servidor corriendo en :3001)
-const API = "http://localhost:3001";
+// Uso: node test-booking-flow.js (inicia un servidor aislado con pagos simulados)
+const fs = require("fs");
+const os = require("os");
 const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
-const db = new sqlite3.Database(
-  path.join(__dirname, "server", "reservations.db"),
-);
+const { spawn } = require("child_process");
+
+const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "booking-flow-"));
+const testDbPath = path.join(tempRoot, "reservations.db");
+let testPort = null;
+let API = null;
+process.env.RESERVATIONS_DB_PATH = testDbPath;
+const db = new sqlite3.Database(testDbPath);
+const serverProcess = spawn(process.execPath, ["server/index.js"], {
+  cwd: __dirname,
+  env: {
+    ...process.env,
+    NODE_ENV: "test",
+    MOCK_PAYMENTS: "true",
+    ADMIN_PASSWORD: "isolated-booking-flow-test-only",
+    JWT_SECRET: "isolated-booking-flow-secret-only",
+    DOMAIN: "http://127.0.0.1",
+    PORT: "0",
+    RESERVATIONS_DB_PATH: testDbPath,
+  },
+  stdio: ["ignore", "pipe", "pipe", "ipc"],
+});
+
+let serverOutput = "";
+serverProcess.stdout.on("data", (chunk) => (serverOutput += chunk));
+serverProcess.stderr.on("data", (chunk) => (serverOutput += chunk));
+
+async function waitForServer() {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (serverProcess.exitCode !== null) {
+      throw new Error(`Isolated server exited early:\n${serverOutput}`);
+    }
+    if (testPort !== null) {
+      API = `http://127.0.0.1:${testPort}`;
+      const response = await fetch(`${API}/health`);
+      if (response.ok) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for isolated server:\n${serverOutput}`);
+}
+
+serverProcess.on("message", (message) => {
+  if (message && message.type === "server-listening") {
+    testPort = message.port;
+  }
+});
+
+function closeDatabase() {
+  return new Promise((resolve) => db.close(() => resolve()));
+}
+
+async function cleanup() {
+  await closeDatabase();
+  if (serverProcess.exitCode === null) serverProcess.kill("SIGTERM");
+  await new Promise((resolve) => {
+    if (serverProcess.exitCode !== null) return resolve();
+    serverProcess.once("exit", resolve);
+    setTimeout(resolve, 2000);
+  });
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+}
 
 let passed = 0;
 let failed = 0;
@@ -72,6 +133,7 @@ function dbRun(sql, params = []) {
 }
 
 (async () => {
+  await waitForServer();
   // Elegir fechas libres dentro del horizonte de reserva (máx 18 meses).
   // Cada punto usa una ventana separada (en días desde hoy) para que las
   // reservas de prueba nunca se solapen entre sí, y nextFreeDate salta
@@ -281,10 +343,10 @@ function dbRun(sql, params = []) {
   );
 
   console.log(`\n===== RESULTADO: ${passed} pasaron, ${failed} fallaron =====`);
-  db.close();
-  process.exit(failed > 0 ? 1 : 0);
-})().catch((e) => {
-  console.error("Error en las pruebas:", e);
-  db.close();
-  process.exit(1);
-});
+  process.exitCode = failed > 0 ? 1 : 0;
+})()
+  .catch((e) => {
+    console.error("Error en las pruebas:", e);
+    process.exitCode = 1;
+  })
+  .finally(cleanup);

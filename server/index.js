@@ -786,7 +786,9 @@ app.post("/api/bookings", async (req, res) => {
  * hasta que las escrituras requeridas hayan terminado correctamente.
  */
 async function handleStripeWebhook(req, res) {
-  const { handleStripeWebhookRequest } = require("./stripe-webhook-persistence");
+  const {
+    handleStripeWebhookRequest,
+  } = require("./stripe-webhook-persistence");
   return handleStripeWebhookRequest({
     req,
     res,
@@ -1194,27 +1196,42 @@ function broadcastAdminUpdate() {
   });
 }
 
-server.listen(PORT, () => {
-  console.log(`\n${"=".repeat(50)}`);
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📍 Environment: ${NODE_ENV}`);
-  console.log(`🌐 Domain: ${DOMAIN}`);
-  console.log(`📅 Calendar URL: ${DOMAIN}/api/calendar.ics`);
-  console.log(`${"=".repeat(50)}\n`);
+function startServer() {
+  server.listen(PORT, () => {
+    const listeningPort = server.address().port;
+    console.log(`\n${"=".repeat(50)}`);
+    console.log(`🚀 Server running on port ${listeningPort}`);
+    console.log(`📍 Environment: ${NODE_ENV}`);
+    console.log(`🌐 Domain: ${DOMAIN}`);
+    console.log(`📅 Calendar URL: ${DOMAIN}/api/calendar.ics`);
+    console.log(`${"=".repeat(50)}\n`);
 
-  // Limpieza periódica de bloqueos temporales de pagos abandonados.
-  // La primera ejecución espera un poco para que database.js termine de crear las tablas.
-  setTimeout(cleanupExpiredHolds, 2000);
-  setInterval(cleanupExpiredHolds, 5 * 60 * 1000);
+    // Limpieza periódica de bloqueos temporales de pagos abandonados.
+    // La primera ejecución espera un poco para que database.js termine de crear las tablas.
+    setTimeout(cleanupExpiredHolds, 2000);
+    setInterval(cleanupExpiredHolds, 5 * 60 * 1000);
 
-  if (AIRBNB_ICAL_URL) {
-    syncAirbnbCalendar();
-    setInterval(syncAirbnbCalendar, 15 * 60 * 1000); // cada hora
-  } else {
-    console.log(
-      "ℹ️ AIRBNB_ICAL_URL no configurado: sincronización con Airbnb desactivada.",
-    );
-  }
+    if (AIRBNB_ICAL_URL) {
+      syncAirbnbCalendar();
+      setInterval(syncAirbnbCalendar, 15 * 60 * 1000); // cada hora
+    } else {
+      console.log(
+        "ℹ️ AIRBNB_ICAL_URL no configurado: sincronización con Airbnb desactivada.",
+      );
+    }
+    if (typeof process.send === "function") {
+      process.send({ type: "server-listening", port: listeningPort });
+    }
+  });
+}
+
+db.ready.then(startServer).catch((err) => {
+  console.error(
+    "❌ Database bootstrap failed; server will not start:",
+    err.message,
+  );
+  process.exitCode = 1;
+  db.close(() => {});
 });
 
 module.exports = { app };
