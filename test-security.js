@@ -38,11 +38,7 @@ async function req(method, p, body, headers = {}) {
 }
 
 (async () => {
-  const env = fs.existsSync("server/.env")
-    ? fs.readFileSync("server/.env", "utf8")
-    : "";
-  const ADMIN_PASSWORD =
-    process.env.ADMIN_PASSWORD || env.match(/^ADMIN_PASSWORD=(.*)$/m)?.[1]?.trim();
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
   if (!ADMIN_PASSWORD) throw new Error("ADMIN_PASSWORD de test manquant");
 
   const configuredAdminOrigin = (
