@@ -87,6 +87,12 @@ function addDays(dateStr, n) {
   return d.toISOString().split("T")[0];
 }
 
+function addMonths(dateStr, months) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.toISOString().split("T")[0];
+}
+
 // Busca la primera fecha libre con un hueco de al menos `gap` días libres
 // (respetando bloqueos conocidos), empezando `minDaysAhead` días después de
 // hoy, sin pasar del horizonte de 18 meses.
@@ -339,7 +345,14 @@ function dbRun(sql, params = []) {
   );
   check(
     "check-out mensual calculado por el servidor",
-    m2.body.pricing && s1.body && true,
+    m2.status === 200 &&
+      (await dbAll(
+        `SELECT checkOut FROM booking_holds
+         WHERE checkIn = ? AND rental_type = 'monthly'
+         ORDER BY rowid DESC LIMIT 1`,
+        [addDays(ci3, 75)],
+      ))[0]?.checkOut === addMonths(addDays(ci3, 75), 3),
+    `check-out esperado=${addMonths(addDays(ci3, 75), 3)}`,
   );
 
   console.log(`\n===== RESULTADO: ${passed} pasaron, ${failed} fallaron =====`);
