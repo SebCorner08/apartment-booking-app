@@ -1,5 +1,10 @@
 // Pruebas de seguridad de la API (contra MOCK_PAYMENTS, servidor en :3001)
 // Uso: node test-security.js
+const path = require("path");
+require("dotenv").config({
+  path: path.join(__dirname, "server", ".env"),
+  override: false,
+});
 const API = "http://localhost:3001";
 const API_URL = process.env.TEST_API_URL || API;
 
