@@ -6,8 +6,8 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const root = __dirname;
-const port = 31000 + (process.pid % 1000);
-const apiUrl = `http://127.0.0.1:${port}`;
+let port = null;
+let apiUrl = null;
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "booking-integration-"));
 const databasePath = path.join(tempRoot, "reservations.db");
 const developmentDatabasePath = path.join(root, "server", "reservations.db");
@@ -18,21 +18,28 @@ const env = {
   ...process.env,
   ADMIN_PASSWORD: "test-admin-password",
   JWT_SECRET: "test-jwt-secret-for-ci-only",
-  PORT: String(port),
+  PORT: "0",
   NODE_ENV: "test",
-  DOMAIN: apiUrl,
-  ALLOWED_ORIGINS: apiUrl,
+  DOMAIN: "http://127.0.0.1",
+  ALLOWED_ORIGINS: "http://127.0.0.1",
   MOCK_PAYMENTS: "true",
   CLEANING_FEE: "0",
   RESERVATIONS_DB_PATH: databasePath,
-  TEST_API_URL: apiUrl,
 };
 
 let serverOutput = "";
 const server = spawn(process.execPath, ["server/index.js"], {
   cwd: root,
   env,
-  stdio: ["ignore", "pipe", "pipe"],
+  stdio: ["ignore", "pipe", "pipe", "ipc"],
+});
+
+server.on("message", (message) => {
+  if (message && message.type === "server-listening") {
+    port = message.port;
+    apiUrl = `http://127.0.0.1:${port}`;
+    env.TEST_API_URL = apiUrl;
+  }
 });
 
 server.stdout.on("data", (chunk) => {
@@ -64,6 +71,10 @@ async function waitForServer() {
       throw new Error(`server exited before readiness\n${serverOutput}`);
     }
     try {
+      if (port === null) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
+      }
       const response = await fetch(`${apiUrl}/health`);
       if (response.ok) {
         await new Promise((resolve) => setTimeout(resolve, 500));
