@@ -5,7 +5,6 @@ const PROD_API_URL = "https://escapelakenorman-api-l2da.onrender.com";
 const API_URL = ["localhost", "127.0.0.1"].includes(window.location.hostname)
   ? `http://${window.location.hostname}:3001`
   : PROD_API_URL;
-const MIN_NIGHTS = 10;
 
 document.addEventListener("DOMContentLoaded", () => {
   const bookingForm = document.getElementById("booking-form");
@@ -187,9 +186,10 @@ document.addEventListener("DOMContentLoaded", () => {
     ...commonOpts,
     onChange: function (selectedDates) {
       if (selectedDates.length > 0) {
-        // Checkout mínimo = checkin + MIN_NIGHTS días
+        // Solo evitamos rangos vacíos; el mínimo configurable lo valida el
+        // servidor, que es la fuente de verdad para las reglas tarifarias.
         const minCheckout = new Date(selectedDates[0]);
-        minCheckout.setDate(minCheckout.getDate() + MIN_NIGHTS);
+        minCheckout.setDate(minCheckout.getDate() + 1);
         checkoutPicker.set("minDate", minCheckout);
 
         // Si checkout actual es menor al nuevo mínimo, limpiarlo
@@ -261,6 +261,12 @@ document.addEventListener("DOMContentLoaded", () => {
       (checkOutDate - checkInDate) / (1000 * 60 * 60 * 24),
     );
 
+    if (priceDisplay) priceDisplay.innerHTML = "";
+    if (bookingMessage && bookingMessage.className === "booking-message error") {
+      bookingMessage.textContent = "";
+      bookingMessage.className = "booking-message";
+    }
+
     try {
       // El servidor calcula noches y precio con SU tarifa; solo enviamos fechas
       const response = await fetch(`${API_URL}/api/calculate-price`, {
@@ -272,18 +278,26 @@ document.addEventListener("DOMContentLoaded", () => {
         }),
       });
 
-      if (response.ok) {
-        const pricing = await response.json();
-        const cleaningRow =
-          pricing.cleaning_fee > 0
-            ? `
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        if (bookingMessage) {
+          bookingMessage.textContent = error.error || "Failed to calculate price";
+          bookingMessage.className = "booking-message error";
+        }
+        return;
+      }
+
+      const pricing = await response.json();
+      const cleaningRow =
+        pricing.cleaning_fee > 0
+          ? `
               <div class="price-row">
                 <span>Cleaning fee:</span>
                 <span>$${pricing.cleaning_fee.toFixed(2)}</span>
               </div>`
-            : "";
-        if (priceDisplay) {
-          priceDisplay.innerHTML = `
+          : "";
+      if (priceDisplay) {
+        priceDisplay.innerHTML = `
             <div class="price-breakdown">
               <div class="price-row">
                 <span>Nightly rate × ${nights} nights:</span>
@@ -303,9 +317,13 @@ document.addEventListener("DOMContentLoaded", () => {
               </div>
             </div>
           `;
-        }
       }
     } catch (error) {
+      if (priceDisplay) priceDisplay.innerHTML = "";
+      if (bookingMessage) {
+        bookingMessage.textContent = "Unable to calculate price. Please try again.";
+        bookingMessage.className = "booking-message error";
+      }
       console.error("Error calculating price:", error);
     }
   }
@@ -483,12 +501,6 @@ document.addEventListener("DOMContentLoaded", () => {
           (checkOutDate - checkInDate) / (1000 * 60 * 60 * 24),
         );
 
-        if (nights < MIN_NIGHTS) {
-          bookingMessage.textContent = `Minimum stay is ${MIN_NIGHTS} nights. Please select a longer period.`;
-          bookingMessage.className = "booking-message error";
-          return;
-        }
-
         // Recargar fechas antes de validar
         await fetchBookedDates();
 
@@ -508,7 +520,10 @@ document.addEventListener("DOMContentLoaded", () => {
           body: JSON.stringify({ checkIn, checkOut }),
         });
 
-        if (!priceResponse.ok) throw new Error("Failed to calculate price");
+        if (!priceResponse.ok) {
+          const error = await priceResponse.json().catch(() => ({}));
+          throw new Error(error.error || "Failed to calculate price");
+        }
         const pricing = await priceResponse.json();
 
         const confirmed = await showBookingConfirmation({
