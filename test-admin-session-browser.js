@@ -35,6 +35,30 @@ assert(
   admin.includes("/api/admin/logout"),
   "logout control must clear the server cookie",
 );
+const logoutHandlerStart = admin.indexOf('getElementById("btn-logout")');
+const logoutHandlerEnd = admin.indexOf("function createRow", logoutHandlerStart);
+assert(
+  logoutHandlerStart !== -1 && logoutHandlerEnd > logoutHandlerStart,
+  "admin must register a logout click handler",
+);
+const logoutHandler = admin.slice(logoutHandlerStart, logoutHandlerEnd);
+assert(
+  logoutHandler.includes("if (!response.ok)"),
+  "logout must reject non-success responses",
+);
+assert(
+  logoutHandler.indexOf('window.location.href = "login.html"') <
+    logoutHandler.indexOf("catch (error)"),
+  "logout must redirect only on the successful path",
+);
+assert(
+  logoutHandler.includes("Your session may still be active"),
+  "logout failure must warn that the session may remain active",
+);
+assert(
+  !logoutHandler.includes("finally"),
+  "logout failure must not unconditionally redirect",
+);
 assert(
   admin.includes(`const PROD_WS_URL = "${renderOrigin}";`),
   "admin must keep the direct Render origin only for WebSocket transport",

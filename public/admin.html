@@ -480,12 +480,19 @@
           .getElementById("btn-logout")
           .addEventListener("click", async () => {
             try {
-              await fetch(`${API_URL}/api/admin/logout`, {
+              const response = await fetch(`${API_URL}/api/admin/logout`, {
                 method: "POST",
                 credentials: "include",
               });
-            } finally {
+              if (!response.ok) {
+                throw new Error(`Logout failed with status ${response.status}`);
+              }
               window.location.href = "login.html";
+            } catch (error) {
+              console.error("Logout failed:", error);
+              window.alert(
+                "Logout failed. Your session may still be active. Please try again.",
+              );
             }
           });
 
