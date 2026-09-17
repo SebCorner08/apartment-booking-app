@@ -641,13 +641,18 @@
       const monthlyRateInput = document.getElementById("monthlyRate");
       const minimumNightsInput = document.getElementById("minimumNights");
       const resetBtn = document.getElementById("resetBtn");
+      const saveButton = form.querySelector('button[type="submit"]');
 
       const DEFAULT_RATES = {
         mecklenburg_sales: 8.25,
         mecklenburg_occupancy: 8.0,
         monthly_rate: 1800,
-        minimum_nights: 10,
       };
+      let authoritativeMinimumNights = null;
+
+      function setSaveAvailability() {
+        saveButton.disabled = authoritativeMinimumNights == null;
+      }
 
       function formatCurrency(amount) {
         return (
@@ -760,13 +765,20 @@
           if (!Number.isInteger(minimumNights) || minimumNights < 1) {
             throw new Error("Invalid minimum stay returned by server");
           }
-          minimumNightsInput.value = minimumNights;
+          authoritativeMinimumNights = minimumNights;
+          minimumNightsInput.value = authoritativeMinimumNights;
+          setSaveAvailability();
 
           updateTaxPreview();
           loading.style.display = "none";
         } catch (error) {
           console.error("Error loading settings:", error);
-          showMessage("Error loading settings. Using defaults.", "error");
+          showMessage(
+            authoritativeMinimumNights == null
+              ? "Error loading settings. Saving is disabled until server settings load successfully."
+              : "Error refreshing settings. Preserving the last server minimum stay.",
+            "error",
+          );
           setDefaultValues();
           loading.style.display = "none";
         }
@@ -776,7 +788,8 @@
         salesInput.value = DEFAULT_RATES.mecklenburg_sales;
         occupancyInput.value = DEFAULT_RATES.mecklenburg_occupancy;
         monthlyRateInput.value = DEFAULT_RATES.monthly_rate;
-        minimumNightsInput.value = DEFAULT_RATES.minimum_nights;
+        minimumNightsInput.value = authoritativeMinimumNights ?? "";
+        setSaveAvailability();
         updateTaxPreview();
       }
 
@@ -788,6 +801,12 @@
           if (!token) {
             window.location.href = "admin.html";
             return;
+          }
+
+          if (authoritativeMinimumNights == null) {
+            throw new Error(
+              "Cannot save settings until server pricing settings load successfully",
+            );
           }
 
           const minimumNights = Number(minimumNightsInput.value);
@@ -820,6 +839,8 @@
             throw new Error(error.error || "Failed to save settings");
           }
 
+          authoritativeMinimumNights = minimumNights;
+          setSaveAvailability();
           showMessage("✅ Tax settings saved successfully!", "success");
           updateTaxPreview();
         } catch (error) {
@@ -839,6 +860,7 @@
       occupancyInput.addEventListener("input", updateTaxPreview);
       monthlyRateInput.addEventListener("input", updateTaxPreview);
 
+      setSaveAvailability();
       loadSettings();
     </script>
   </body>
