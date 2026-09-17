@@ -34,6 +34,7 @@ const getElement = (id) => {
 let onReady;
 const errors = [];
 const requestedUrls = [];
+const webSocketConnections = [];
 const charges = [
   {
     id: 7,
@@ -61,9 +62,17 @@ const sandbox = {
     requestedUrls.push(url);
     assert(
       url === "http://localhost:3001/api/admin/bookings" ||
-        url === "http://localhost:3001/api/admin/charges",
+        url === "http://localhost:3001/api/admin/charges" ||
+        url === "http://localhost:3001/api/admin/websocket-ticket",
       `unexpected request: ${url}`,
     );
+    if (url.endsWith("/api/admin/websocket-ticket")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ticket: "test-websocket-ticket" }),
+      };
+    }
     return {
       ok: true,
       status: 200,
@@ -74,6 +83,10 @@ const sandbox = {
     };
   },
   WebSocket: class {
+    constructor(url, protocols) {
+      webSocketConnections.push({ url, protocols });
+    }
+
     addEventListener() {}
   },
   navigator: { clipboard: { writeText: async () => {} } },
@@ -99,6 +112,16 @@ async function run() {
   assert.deepStrictEqual(requestedUrls.sort(), [
     "http://localhost:3001/api/admin/bookings",
     "http://localhost:3001/api/admin/charges",
+    "http://localhost:3001/api/admin/websocket-ticket",
+  ]);
+  assert.strictEqual(webSocketConnections.length, 1);
+  assert.strictEqual(
+    webSocketConnections[0].url,
+    "ws://localhost:3001/admin-updates",
+  );
+  assert.deepStrictEqual(Array.from(webSocketConnections[0].protocols), [
+    "admin-updates",
+    "admin-ticket.test-websocket-ticket",
   ]);
 
   const renderedRows = getElement("charges-tbody").children;

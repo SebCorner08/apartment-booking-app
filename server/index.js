@@ -29,6 +29,11 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const AIRBNB_ICAL_URL = process.env.AIRBNB_ICAL_URL;
 const ADMIN_SESSION_MINUTES = 60;
 const ADMIN_COOKIE_NAME = "admin_session";
+const ADMIN_WS_PATH = "/admin-updates";
+const ADMIN_WS_PROTOCOL = "admin-updates";
+const ADMIN_WS_TICKET_PREFIX = "admin-ticket.";
+const ADMIN_WS_TICKET_TTL_MS = 15 * 1000;
+const adminWebSocketTickets = new Map();
 
 // Reglas tarifarias activas (los importes monetarios reales se leen de la DB)
 const MIN_NIGHTS = 10;
@@ -214,6 +219,57 @@ const checkAdminAuth = (req, res, next) => {
     next();
   });
 };
+
+function purgeExpiredAdminWebSocketTickets(now = Date.now()) {
+  for (const [ticket, record] of adminWebSocketTickets) {
+    if (record.expiresAt <= now || record.sessionExpiresAt <= now) {
+      adminWebSocketTickets.delete(ticket);
+    }
+  }
+}
+
+function issueAdminWebSocketTicket(origin, user) {
+  const now = Date.now();
+  purgeExpiredAdminWebSocketTickets(now);
+
+  const sessionExpiresAt = Number(user && user.exp) * 1000;
+  if (!Number.isFinite(sessionExpiresAt) || sessionExpiresAt <= now) {
+    return null;
+  }
+
+  const ticket = crypto.randomBytes(32).toString("base64url");
+  adminWebSocketTickets.set(ticket, {
+    origin: origin || null,
+    expiresAt: now + ADMIN_WS_TICKET_TTL_MS,
+    sessionExpiresAt,
+  });
+  return ticket;
+}
+
+function consumeAdminWebSocketTicket(ticket, origin) {
+  const now = Date.now();
+  purgeExpiredAdminWebSocketTickets(now);
+  const record = adminWebSocketTickets.get(ticket);
+
+  if (!record || record.origin !== (origin || null)) return null;
+
+  adminWebSocketTickets.delete(ticket);
+  return record;
+}
+
+function parseWebSocketProtocols(request) {
+  return String(request.headers["sec-websocket-protocol"] || "")
+    .split(",")
+    .map((protocol) => protocol.trim())
+    .filter(Boolean);
+}
+
+function rejectWebSocketUpgrade(socket, statusCode, statusText) {
+  socket.write(
+    `HTTP/1.1 ${statusCode} ${statusText}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+  );
+  socket.destroy();
+}
 
 // ============ FUNCIONES AUXILIARES ============
 
@@ -895,6 +951,17 @@ app.post("/api/admin/logout", (req, res) => {
   res.sendStatus(204);
 });
 
+app.post("/api/admin/websocket-ticket", checkAdminAuth, (req, res) => {
+  const ticket = issueAdminWebSocketTicket(req.headers.origin, req.user);
+  if (!ticket) return res.sendStatus(401);
+
+  res.set("Cache-Control", "no-store");
+  res.json({
+    ticket,
+    expires_in_seconds: ADMIN_WS_TICKET_TTL_MS / 1000,
+  });
+});
+
 // Obtener todas las reservas (requiere autenticación)
 app.get("/api/admin/bookings", checkAdminAuth, (req, res) => {
   const sql = "SELECT * FROM bookings ORDER BY checkIn DESC";
@@ -1319,13 +1386,71 @@ async function syncAirbnbCalendar() {
 // ============ SERVER ============
 const server = http.createServer(app);
 
-// WebSocket para notificar al panel admin en tiempo real (nuevas reservas, cancelaciones, sync)
-const wss = new WebSocket.Server({ server });
+// WebSocket autenticado para notificar al panel admin en tiempo real.
+// El navegador obtiene primero un ticket efímero mediante la cookie HttpOnly.
+const wss = new WebSocket.Server({
+  noServer: true,
+  handleProtocols(protocols) {
+    return protocols.has(ADMIN_WS_PROTOCOL) ? ADMIN_WS_PROTOCOL : false;
+  },
+});
+
+server.on("upgrade", (request, socket, head) => {
+  let requestUrl;
+  try {
+    requestUrl = new URL(
+      request.url,
+      `http://${request.headers.host || "localhost"}`,
+    );
+  } catch {
+    return rejectWebSocketUpgrade(socket, 400, "Bad Request");
+  }
+
+  if (requestUrl.pathname !== ADMIN_WS_PATH) {
+    return rejectWebSocketUpgrade(socket, 404, "Not Found");
+  }
+
+  const origin = request.headers.origin;
+  if (!isAllowedOrigin(origin)) {
+    return rejectWebSocketUpgrade(socket, 403, "Forbidden");
+  }
+
+  const protocols = parseWebSocketProtocols(request);
+  const ticketProtocol = protocols.find((protocol) =>
+    protocol.startsWith(ADMIN_WS_TICKET_PREFIX),
+  );
+  if (!protocols.includes(ADMIN_WS_PROTOCOL) || !ticketProtocol) {
+    return rejectWebSocketUpgrade(socket, 401, "Unauthorized");
+  }
+
+  const ticket = ticketProtocol.slice(ADMIN_WS_TICKET_PREFIX.length);
+  const ticketRecord = consumeAdminWebSocketTicket(ticket, origin);
+  if (!ticketRecord) {
+    return rejectWebSocketUpgrade(socket, 401, "Unauthorized");
+  }
+
+  wss.handleUpgrade(request, socket, head, (client) => {
+    client.isAdminAuthenticated = true;
+    client.adminSessionExpiresAt = ticketRecord.sessionExpiresAt;
+
+    const sessionTimer = setTimeout(
+      () => client.close(4001, "Admin session expired"),
+      Math.max(0, ticketRecord.sessionExpiresAt - Date.now()),
+    );
+    client.once("close", () => clearTimeout(sessionTimer));
+
+    wss.emit("connection", client, request);
+  });
+});
 
 function broadcastAdminUpdate() {
   const payload = JSON.stringify({ type: "bookings_updated" });
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
+    if (
+      client.isAdminAuthenticated &&
+      client.adminSessionExpiresAt > Date.now() &&
+      client.readyState === WebSocket.OPEN
+    ) {
       client.send(payload);
     }
   });

@@ -5,6 +5,8 @@ require("dotenv").config({
   path: path.join(__dirname, "server", ".env"),
   override: false,
 });
+const WebSocket = require("ws");
+const jwt = require("jsonwebtoken");
 const API = "http://localhost:3001";
 const API_URL = process.env.TEST_API_URL || API;
 
@@ -35,6 +37,41 @@ async function req(method, p, body, headers = {}) {
     body: body ? JSON.stringify(body) : undefined,
   });
   return r;
+}
+
+function openWebSocket(pathname, protocols, origin) {
+  return new Promise((resolve, reject) => {
+    const websocketUrl = `${API_URL.replace(/^http/, "ws")}${pathname}`;
+    const socket = new WebSocket(websocketUrl, protocols, { origin });
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.terminate();
+      reject(new Error(`WebSocket timeout for ${pathname}`));
+    }, 3000);
+
+    socket.once("open", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ socket, status: 101 });
+    });
+    socket.once("unexpected-response", (_request, response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      const status = response.statusCode;
+      response.resume();
+      resolve({ socket: null, status });
+    });
+    socket.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
 }
 
 (async () => {
@@ -100,6 +137,173 @@ async function req(method, p, body, headers = {}) {
   });
   check("admin con cookie válida → 200", r.status === 200, `status=${r.status}`);
 
+  const websocketOrigin = configuredAdminOrigin || "http://127.0.0.1";
+  const websocketPath = "/admin-updates";
+
+  r = await req("POST", "/api/admin/websocket-ticket", null, {
+    Origin: websocketOrigin,
+  });
+  check(
+    "ticket WebSocket sans cookie → 401",
+    r.status === 401,
+    `status=${r.status}`,
+  );
+
+  r = await req("POST", "/api/admin/websocket-ticket", null, {
+    Cookie: sessionCookie.split(";")[0],
+    Origin: "https://attacker.example",
+  });
+  check(
+    "ticket WebSocket avec origine hostile → 403",
+    r.status === 403,
+    `status=${r.status}`,
+  );
+
+  if (process.env.NODE_ENV === "production") {
+    r = await req("POST", "/api/admin/websocket-ticket", null, {
+      Cookie: sessionCookie.split(";")[0],
+    });
+    check(
+      "ticket WebSocket sans origine en production → 403",
+      r.status === 403,
+      `status=${r.status}`,
+    );
+  }
+
+  let websocketAttempt = await openWebSocket(
+    websocketPath,
+    ["admin-updates"],
+    websocketOrigin,
+  );
+  check(
+    "WebSocket sans ticket → 401",
+    websocketAttempt.status === 401,
+    `status=${websocketAttempt.status}`,
+  );
+
+  websocketAttempt = await openWebSocket(
+    websocketPath,
+    ["admin-updates", "admin-ticket.invalid"],
+    websocketOrigin,
+  );
+  check(
+    "ticket WebSocket invalide → 401",
+    websocketAttempt.status === 401,
+    `status=${websocketAttempt.status}`,
+  );
+
+  websocketAttempt = await openWebSocket(
+    "/unexpected-admin-path",
+    ["admin-updates", "admin-ticket.invalid"],
+    websocketOrigin,
+  );
+  check(
+    "chemin WebSocket inattendu → 404",
+    websocketAttempt.status === 404,
+    `status=${websocketAttempt.status}`,
+  );
+
+  r = await req("POST", "/api/admin/websocket-ticket", null, {
+    Cookie: sessionCookie.split(";")[0],
+    Origin: websocketOrigin,
+  });
+  const websocketTicketResponse = await r.json();
+  const websocketTicket = websocketTicketResponse.ticket;
+  check(
+    "ticket WebSocket authentifié, bref et non mis en cache",
+    r.status === 200 &&
+      typeof websocketTicket === "string" &&
+      websocketTicket.length >= 32 &&
+      websocketTicketResponse.expires_in_seconds <= 30 &&
+      /no-store/i.test(r.headers.get("cache-control") || "") &&
+      !JSON.stringify(websocketTicketResponse).includes(
+        sessionCookie.split(";")[0].split("=")[1],
+      ),
+    `status=${r.status}; cache=${r.headers.get("cache-control")}`,
+  );
+
+  websocketAttempt = await openWebSocket(
+    websocketPath,
+    ["admin-updates", `admin-ticket.${websocketTicket}`],
+    "https://attacker.example",
+  );
+  check(
+    "ticket WebSocket lié à l'origine → 403",
+    websocketAttempt.status === 403,
+    `status=${websocketAttempt.status}`,
+  );
+
+  websocketAttempt = await openWebSocket(
+    websocketPath,
+    ["admin-updates", `admin-ticket.${websocketTicket}`],
+    websocketOrigin,
+  );
+  check(
+    "WebSocket admin avec ticket valide → 101",
+    websocketAttempt.status === 101 &&
+      websocketAttempt.socket.protocol === "admin-updates",
+    `status=${websocketAttempt.status}`,
+  );
+
+  const updateMessage = Promise.race([
+    new Promise((resolve) =>
+      websocketAttempt.socket.once("message", (data) => resolve(String(data))),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve(null), 2000)),
+  ]);
+  r = await req("POST", "/api/admin/bookings/0/cancel", null, {
+    Cookie: sessionCookie.split(";")[0],
+    Origin: websocketOrigin,
+  });
+  const receivedUpdate = await updateMessage;
+  check(
+    "seul le socket authentifié reçoit les mises à jour admin",
+    r.status === 200 && receivedUpdate === '{"type":"bookings_updated"}',
+    `mutation=${r.status}; message=${receivedUpdate}`,
+  );
+  websocketAttempt.socket.close();
+
+  websocketAttempt = await openWebSocket(
+    websocketPath,
+    ["admin-updates", `admin-ticket.${websocketTicket}`],
+    websocketOrigin,
+  );
+  check(
+    "ticket WebSocket rejoué → 401",
+    websocketAttempt.status === 401,
+    `status=${websocketAttempt.status}`,
+  );
+
+  const expiringSession = jwt.sign(
+    { name: "admin", role: "admin" },
+    process.env.JWT_SECRET,
+    { expiresIn: "2s" },
+  );
+  r = await req("POST", "/api/admin/websocket-ticket", null, {
+    Cookie: `admin_session=${expiringSession}`,
+    Origin: websocketOrigin,
+  });
+  const expiringTicket = (await r.json()).ticket;
+  websocketAttempt = await openWebSocket(
+    websocketPath,
+    ["admin-updates", `admin-ticket.${expiringTicket}`],
+    websocketOrigin,
+  );
+  const sessionCloseCode = await Promise.race([
+    new Promise((resolve) =>
+      websocketAttempt.socket.once("close", (code) => resolve(code)),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+  ]);
+  check(
+    "WebSocket fermé à l'expiration de la session → 4001",
+    sessionCloseCode === 4001,
+    `code=${sessionCloseCode}`,
+  );
+  if (websocketAttempt.socket.readyState !== WebSocket.CLOSED) {
+    websocketAttempt.socket.terminate();
+  }
+
   r = await req("POST", "/api/admin/logout", null, {
     Cookie: sessionCookie.split(";")[0],
     ...adminMutationHeaders,
@@ -152,6 +356,13 @@ async function req(method, p, body, headers = {}) {
     last.status === 429,
     `status=${last.status}`,
   );
+
+  if (process.env.ADMIN_SECURITY_ONLY === "true") {
+    console.log(
+      `\n===== RESULTADO ADMIN: ${passed} pasaron, ${failed} fallaron =====`,
+    );
+    process.exit(failed > 0 ? 1 : 0);
+  }
 
   console.log("\n[Inyección y validación de entrada]");
   r = await req("POST", "/api/create-checkout-session", {

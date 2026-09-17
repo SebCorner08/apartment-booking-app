@@ -5,6 +5,7 @@ const login = fs.readFileSync("public/login.html", "utf8");
 const admin = fs.readFileSync("public/admin.html", "utf8");
 const taxSettings = fs.readFileSync("public/tax-settings.html", "utf8");
 const netlify = fs.readFileSync("netlify.toml", "utf8");
+const server = fs.readFileSync("server/index.js", "utf8");
 
 const renderOrigin = "https://escapelakenorman-api-l2da.onrender.com";
 const firstPartyApiPattern =
@@ -66,6 +67,44 @@ assert(
 assert(
   admin.includes("const WS_API_URL = IS_LOCAL ? API_URL : PROD_WS_URL;"),
   "admin must route WebSocket transport independently from first-party HTTP",
+);
+const websocketFunctionStart = admin.indexOf(
+  "async function connectWebSocket()",
+);
+const websocketFunctionEnd = admin.indexOf(
+  "// --- FUNCIONES DE AYUDA ---",
+  websocketFunctionStart,
+);
+const websocketFunction = admin.slice(
+  websocketFunctionStart,
+  websocketFunctionEnd,
+);
+assert(
+  websocketFunctionStart !== -1 &&
+    websocketFunctionEnd > websocketFunctionStart,
+  "admin must define the WebSocket connection flow",
+);
+assert(
+  websocketFunction.includes("/api/admin/websocket-ticket") &&
+    websocketFunction.indexOf("/api/admin/websocket-ticket") <
+      websocketFunction.indexOf("new WebSocket"),
+  "admin must authenticate before opening the WebSocket",
+);
+assert(
+  websocketFunction.includes('"admin-updates"') &&
+    websocketFunction.includes("admin-ticket.${ticket}"),
+  "admin must present the scoped WebSocket ticket as a subprotocol",
+);
+assert(
+  server.includes("new WebSocket.Server({") &&
+    server.includes("noServer: true") &&
+    server.includes("consumeAdminWebSocketTicket(ticket, origin)"),
+  "server must authorize WebSocket upgrades before accepting clients",
+);
+assert(
+  server.includes("client.isAdminAuthenticated") &&
+    server.includes("client.adminSessionExpiresAt > Date.now()"),
+  "server must broadcast admin updates only to authenticated live sessions",
 );
 assert(
   netlify.includes('from = "/api/*"') &&

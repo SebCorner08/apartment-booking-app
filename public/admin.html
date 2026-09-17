@@ -411,14 +411,40 @@
 
         // --- WEBSOCKET ---
         const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-        const wsUrl = `${wsProtocol}://${WS_API_URL.replace(/^https?:\/\//, "")}`;
+        const wsUrl = `${wsProtocol}://${WS_API_URL.replace(/^https?:\/\//, "")}/admin-updates`;
         let socket = null;
+        let allowWebSocketReconnect = true;
 
-        function connectWebSocket() {
+        function scheduleWebSocketReconnect() {
+          if (allowWebSocketReconnect) {
+            setTimeout(connectWebSocket, 3000);
+          }
+        }
+
+        async function connectWebSocket() {
           try {
-            socket = new WebSocket(wsUrl);
+            const ticketResponse = await fetchWithAuth(
+              `${API_URL}/api/admin/websocket-ticket`,
+              { method: "POST" },
+            );
+            if (!ticketResponse.ok) {
+              throw new Error(
+                `WebSocket ticket failed with status ${ticketResponse.status}`,
+              );
+            }
 
-            socket.addEventListener("message", (event) => {
+            const { ticket } = await ticketResponse.json();
+            if (!ticket) {
+              throw new Error("WebSocket ticket response is invalid.");
+            }
+
+            const nextSocket = new WebSocket(wsUrl, [
+              "admin-updates",
+              `admin-ticket.${ticket}`,
+            ]);
+            socket = nextSocket;
+
+            nextSocket.addEventListener("message", (event) => {
               const message = JSON.parse(event.data);
               if (message.type === "bookings_updated") {
                 console.log(
@@ -428,23 +454,24 @@
               }
             });
 
-            socket.addEventListener("open", () => {
+            nextSocket.addEventListener("open", () => {
               console.log("WebSocket connection established.");
             });
 
-            socket.addEventListener("close", () => {
+            nextSocket.addEventListener("close", () => {
+              if (socket === nextSocket) socket = null;
               console.log(
                 "WebSocket connection closed. Attempting to reconnect...",
               );
-              setTimeout(connectWebSocket, 3000);
+              scheduleWebSocketReconnect();
             });
 
-            socket.addEventListener("error", (error) => {
+            nextSocket.addEventListener("error", (error) => {
               console.error("WebSocket error:", error);
             });
           } catch (error) {
             console.error("WebSocket connection error:", error);
-            setTimeout(connectWebSocket, 3000);
+            if (!error.isAuthFailure) scheduleWebSocketReconnect();
           }
         }
 
@@ -461,7 +488,9 @@
           });
           if (response.status === 401 || response.status === 403) {
             window.location.href = "login.html";
-            throw new Error("Session expired or invalid.");
+            const error = new Error("Session expired or invalid.");
+            error.isAuthFailure = true;
+            throw error;
           }
           return response;
         }
@@ -487,6 +516,8 @@
               if (!response.ok) {
                 throw new Error(`Logout failed with status ${response.status}`);
               }
+              allowWebSocketReconnect = false;
+              if (socket) socket.close();
               window.location.href = "login.html";
             } catch (error) {
               console.error("Logout failed:", error);

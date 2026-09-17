@@ -16,6 +16,15 @@ protect the cross-site production cookie from CSRF.
 Production also rejects state-changing admin requests without an `Origin`;
 non-browser administrative clients are not supported by this cookie flow.
 
+Admin WebSocket connections use a separate, single-purpose ticket because the
+production socket connects directly to Render while the session cookie is
+first-party on the Netlify site. The browser obtains the ticket from
+`POST /api/admin/websocket-ticket` with its HttpOnly cookie, then presents it
+as a WebSocket subprotocol on the fixed `/admin-updates` path. Tickets expire
+after 15 seconds, are bound to the requesting Origin, are consumed once and do
+not contain the admin JWT. The server rejects every upgrade before ticket and
+Origin validation and closes accepted sockets when the parent session expires.
+
 Both Helmet and Netlify apply an explicit Content Security Policy. Inline
 scripts and styles remain temporarily allowed because the current static pages
 depend on them; allowed third-party sources are enumerated instead of allowing
