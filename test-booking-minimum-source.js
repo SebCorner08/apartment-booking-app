@@ -169,6 +169,11 @@ assert(
   booking.includes("let priceRequestSequence = 0;"),
   "pricing requests must have a monotonic sequence guard",
 );
+assert.strictEqual(
+  (booking.match(/let priceRequestSequence = 0;/g) || []).length,
+  1,
+  "short-stay and monthly quotes must share one request sequence",
+);
 assert(
   priceDisplaySource.includes("const requestSequence = ++priceRequestSequence;"),
   "each pricing refresh must invalidate every older request",
@@ -177,6 +182,44 @@ assert(
   (priceDisplaySource.match(/requestSequence !== priceRequestSequence/g) || [])
     .length >= 4,
   "stale success, rejection, JSON and network-error paths must not update the UI",
+);
+
+const monthlyPriceStart = booking.indexOf(
+  "async function updateMonthlyPriceDisplay()",
+);
+const monthlyPriceEnd = booking.indexOf(
+  "// ============ FLATPICKR ============",
+  monthlyPriceStart,
+);
+assert(
+  monthlyPriceStart >= 0 && monthlyPriceEnd > monthlyPriceStart,
+  "monthly pricing regression scope must be extractable",
+);
+const monthlyPriceSource = booking.slice(monthlyPriceStart, monthlyPriceEnd);
+assert(
+  monthlyPriceSource.includes(
+    "const requestSequence = ++priceRequestSequence;",
+  ),
+  "each monthly quote must invalidate every older pricing request",
+);
+assert(
+  (monthlyPriceSource.match(/requestSequence !== priceRequestSequence/g) || [])
+    .length >= 3,
+  "monthly response, JSON and error paths must ignore stale requests",
+);
+assert(
+  (monthlyPriceSource.match(/currentRentalType !== "monthly"/g) || []).length >=
+    3,
+  "a monthly response must not overwrite the UI after changing rental type",
+);
+
+const initialRentalType = booking.indexOf('setRentalType("short_stay");');
+const checkoutPickerDeclaration = booking.indexOf(
+  'const checkoutPicker = flatpickr("#checkout"',
+);
+assert(
+  initialRentalType > checkoutPickerDeclaration,
+  "the initial quote refresh must run only after both date pickers exist",
 );
 
 console.log("booking minimum-night source-of-truth check passed");

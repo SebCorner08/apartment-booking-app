@@ -19,6 +19,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Estado de fechas bloqueadas (rangos completos)
   let bookedDateRanges = [];
   let currentRentalType = "short_stay"; // "short_stay" o "monthly"
+  let priceRequestSequence = 0;
 
   /**
    * Función que flatpickr usa para bloquear fechas.
@@ -95,9 +96,6 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Estado inicial: Short Stay activo, campos mensuales desactivados
-  setRentalType("short_stay");
-
   if (monthlyStartInput) {
     monthlyStartInput.addEventListener("change", updateMonthlyPriceDisplay);
   }
@@ -106,6 +104,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   async function updateMonthlyPriceDisplay() {
+    const requestSequence = ++priceRequestSequence;
     const startDate = monthlyStartInput.value;
     const months = parseInt(monthlyDurationSelect.value) || 3;
 
@@ -125,8 +124,21 @@ document.addEventListener("DOMContentLoaded", () => {
         }),
       });
 
+      if (
+        requestSequence !== priceRequestSequence ||
+        currentRentalType !== "monthly"
+      ) {
+        return;
+      }
+
       if (response.ok) {
         const pricing = await response.json();
+        if (
+          requestSequence !== priceRequestSequence ||
+          currentRentalType !== "monthly"
+        ) {
+          return;
+        }
         const totalMonths = months;
         if (priceDisplay) {
           priceDisplay.innerHTML = `
@@ -152,6 +164,12 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
     } catch (error) {
+      if (
+        requestSequence !== priceRequestSequence ||
+        currentRentalType !== "monthly"
+      ) {
+        return;
+      }
       console.error("Error calculating monthly price:", error);
     }
   }
@@ -210,6 +228,11 @@ document.addEventListener("DOMContentLoaded", () => {
     },
   });
 
+  // Estado inicial: Short Stay activo, campos mensuales desactivados.
+  // Se inicializa después de ambos calendarios porque la primera actualización
+  // de precio consulta sus selecciones actuales.
+  setRentalType("short_stay");
+
   // ============ FECHAS BLOQUEADAS ============
 
   fetchBookedDates();
@@ -242,8 +265,6 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ============ PRECIO ============
-
-  let priceRequestSequence = 0;
 
   async function updatePriceDisplay() {
     const requestSequence = ++priceRequestSequence;

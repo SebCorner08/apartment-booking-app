@@ -496,6 +496,11 @@ app.post("/api/calculate-price", async (req, res) => {
         .status(400)
         .json({ error: "Missing or invalid check-in/check-out dates" });
     }
+    if (nights > MAX_NIGHTS) {
+      return res
+        .status(400)
+        .json({ error: `Maximum stay is ${MAX_NIGHTS} nights` });
+    }
     if (nights < rates.minimum_nights) {
       return res
         .status(400)
