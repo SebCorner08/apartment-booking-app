@@ -30,6 +30,8 @@ environment variables does not override the stored runtime configuration.
 ## Migration and rollback
 
 Existing databases gain nullable-compatible `cleaning_fee` and
-`minimum_nights` columns with safe defaults. Existing nightly and monthly
-rates are preserved. Rollback consists of reverting the application commit;
-SQLite may retain the additive columns and older code safely ignores them.
+`minimum_nights` columns. Existing rows receive the validated environment
+bootstrap values for those newly introduced fields while existing nightly and
+monthly rates are preserved. Rollback consists of reverting the application
+commit; SQLite may retain the additive columns and older code safely ignores
+them.

@@ -145,13 +145,23 @@ db.run(
 );
 
 db.run(
-  `ALTER TABLE tax_settings ADD COLUMN cleaning_fee REAL DEFAULT 0`,
+  `ALTER TABLE tax_settings ADD COLUMN cleaning_fee REAL`,
   compatibilityColumn("tax_settings", "cleaning_fee"),
+);
+db.run(
+  `UPDATE tax_settings SET cleaning_fee = ? WHERE cleaning_fee IS NULL`,
+  [DEFAULT_PRICING.cleaning_fee],
+  requiredStep("Error al migrar tax_settings.cleaning_fee"),
 );
 
 db.run(
-  `ALTER TABLE tax_settings ADD COLUMN minimum_nights INTEGER DEFAULT 10`,
+  `ALTER TABLE tax_settings ADD COLUMN minimum_nights INTEGER`,
   compatibilityColumn("tax_settings", "minimum_nights"),
+);
+db.run(
+  `UPDATE tax_settings SET minimum_nights = ? WHERE minimum_nights IS NULL`,
+  [DEFAULT_PRICING.minimum_nights],
+  requiredStep("Error al migrar tax_settings.minimum_nights"),
 );
 
 // Migración: número de huéspedes por reserva

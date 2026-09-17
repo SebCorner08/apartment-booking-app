@@ -495,6 +495,8 @@ try {
     RESERVATIONS_DB_PATH: populatedLegacyPath,
     TAX_MECKLENBURG_SALES: "9.9",
     TAX_MECKLENBURG_OCCUPANCY: "8.8",
+    CLEANING_FEE: "135",
+    MINIMUM_NIGHTS: "14",
   };
   delete legacyEnv.DATABASE_PATH;
 
@@ -567,6 +569,9 @@ try {
                   tax.mecklenburg_occupancy !== 8 ||
                   tax.monthly_rate !== 1800 || tax.nightly_rate !== 150) {
                 throw new Error("Legacy tax compatibility columns were not added");
+              }
+              if (tax.cleaning_fee !== 135 || tax.minimum_nights !== 14) {
+                throw new Error("Legacy pricing columns did not preserve configured bootstrap values");
               }
               db.get(
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_bookings_stripe_payment_id'",
