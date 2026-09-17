@@ -46,18 +46,85 @@ assert(
   "admin updates must send the edited minimum stay to the server",
 );
 assert(
-  taxSettings.includes("minimum_nights: 10"),
-  "admin pricing settings must define a valid minimum-stay fallback",
+  !taxSettings.includes("minimum_nights: 10"),
+  "the admin browser must not define a competing minimum-stay fallback",
+);
+assert(
+  taxSettings.includes("let authoritativeMinimumNights = null;"),
+  "the admin page must track whether a server minimum was loaded",
 );
 assert(
   taxSettings.includes(
-    "minimumNightsInput.value = DEFAULT_RATES.minimum_nights",
+    'minimumNightsInput.value = authoritativeMinimumNights ?? ""',
   ),
-  "loading fallback and Reset must populate the required minimum stay",
+  "Reset and load-failure fallback must preserve the last server minimum and otherwise leave it empty",
+);
+assert(
+  taxSettings.includes(
+    "saveButton.disabled = authoritativeMinimumNights == null",
+  ),
+  "saving must stay disabled until a server minimum is available",
+);
+assert(
+  taxSettings.includes(
+    "Cannot save settings until server pricing settings load successfully",
+  ),
+  "submit must fail closed when no authoritative server snapshot was loaded",
+);
+assert(
+  !taxSettings.includes("minimumNightsInput.value = DEFAULT_RATES.minimum_nights"),
+  "Reset must not replace the server minimum with a browser default",
 );
 assert(
   !taxSettings.includes("minimum_nights: 0"),
   "the admin fallback must not use an invalid minimum stay",
+);
+
+const loadStart = taxSettings.indexOf("async function loadSettings()");
+const defaultsStart = taxSettings.indexOf("function setDefaultValues()", loadStart);
+assert(loadStart >= 0 && defaultsStart > loadStart, "loadSettings source must be extractable");
+const loadSource = taxSettings.slice(loadStart, defaultsStart);
+assert(
+  loadSource.includes("authoritativeMinimumNights = minimumNights"),
+  "a successful load must capture the server minimum before enabling save/reset behavior",
+);
+assert(
+  loadSource.includes("setDefaultValues();"),
+  "a failed load must route through the guarded fallback path",
+);
+
+const submitStart = taxSettings.indexOf('form.addEventListener("submit"');
+assert(submitStart > defaultsStart, "submit handler source must be extractable");
+const defaultsSource = taxSettings.slice(defaultsStart, submitStart);
+assert(
+  defaultsSource.includes('minimumNightsInput.value = authoritativeMinimumNights ?? ""'),
+  "Reset must preserve the last successfully loaded server minimum",
+);
+assert(
+  defaultsSource.includes("setSaveAvailability();"),
+  "Reset/load failure must recompute fail-closed save availability",
+);
+
+const resetStart = taxSettings.indexOf('resetBtn.addEventListener("click"', submitStart);
+assert(resetStart > submitStart, "reset handler source must be extractable");
+const submitSource = taxSettings.slice(submitStart, resetStart);
+assert(
+  submitSource.includes("if (authoritativeMinimumNights == null)"),
+  "submit must reject saves before any authoritative minimum was loaded",
+);
+assert(
+  submitSource.includes("authoritativeMinimumNights = minimumNights"),
+  "a successful save must advance the remembered server minimum for later Reset operations",
+);
+
+const resetEnd = taxSettings.indexOf(
+  'salesInput.addEventListener("input"',
+  resetStart,
+);
+const resetSource = taxSettings.slice(resetStart, resetEnd);
+assert(
+  resetSource.includes("setDefaultValues();"),
+  "Reset must use the guarded default/reset helper",
 );
 
 const priceDisplayStart = booking.indexOf("async function updatePriceDisplay()");
