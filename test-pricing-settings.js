@@ -7,6 +7,7 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 const {
   DEFAULT_PRICING,
+  MAX_NIGHTS,
   buildDefaultPricing,
   normalizePricingRow,
   mergePricingSettings,
@@ -45,6 +46,20 @@ assert.throws(
   () => mergePricingSettings(current, { minimum_nights: 2.5 }),
   /positive integer/,
 );
+assert.strictEqual(
+  mergePricingSettings(current, { minimum_nights: MAX_NIGHTS }).minimum_nights,
+  MAX_NIGHTS,
+  "the configured minimum may equal the supported maximum stay",
+);
+assert.throws(
+  () =>
+    mergePricingSettings(current, { minimum_nights: MAX_NIGHTS + 1 }),
+  /must not exceed the 365-night maximum stay/,
+);
+assert.throws(
+  () => normalizePricingRow({ ...current, minimum_nights: MAX_NIGHTS + 1 }),
+  /must not exceed the 365-night maximum stay/,
+);
 assert.throws(
   () => mergePricingSettings(current, { nightly_rate: 0 }),
   /greater than zero/,
@@ -53,6 +68,10 @@ assert.throws(
 assert.throws(
   () => buildDefaultPricing({ MINIMUM_NIGHTS: "2.5" }),
   /positive integer/,
+);
+assert.throws(
+  () => buildDefaultPricing({ MINIMUM_NIGHTS: String(MAX_NIGHTS + 1) }),
+  /must not exceed the 365-night maximum stay/,
 );
 assert.throws(
   () => buildDefaultPricing({ NIGHTLY_RATE: "0" }),

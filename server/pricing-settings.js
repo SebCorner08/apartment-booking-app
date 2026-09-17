@@ -1,5 +1,7 @@
 "use strict";
 
+const MAX_NIGHTS = 365;
+
 const PRICING_FIELDS = [
   "nightly_rate",
   "monthly_rate",
@@ -28,6 +30,11 @@ function validatePricingSettings(pricing) {
 
   if (!Number.isInteger(pricing.minimum_nights) || pricing.minimum_nights < 1) {
     throw new TypeError("minimum_nights must be a positive integer");
+  }
+  if (pricing.minimum_nights > MAX_NIGHTS) {
+    throw new TypeError(
+      `minimum_nights must not exceed the ${MAX_NIGHTS}-night maximum stay`,
+    );
   }
   if (pricing.nightly_rate <= 0 || pricing.monthly_rate <= 0) {
     throw new TypeError("nightly_rate and monthly_rate must be greater than zero");
@@ -105,6 +112,7 @@ function validateRequiredTaxUpdate(payload) {
 
 module.exports = {
   DEFAULT_PRICING,
+  MAX_NIGHTS,
   PRICING_FIELDS,
   buildDefaultPricing,
   validatePricingSettings,

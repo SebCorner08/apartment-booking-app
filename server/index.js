@@ -14,6 +14,7 @@ const ical = require("node-ical");
 const db = require("./database.js");
 const {
   DEFAULT_PRICING,
+  MAX_NIGHTS,
   normalizePricingRow,
   mergePricingSettings,
   validateRequiredTaxUpdate,
@@ -35,7 +36,6 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const AIRBNB_ICAL_URL = process.env.AIRBNB_ICAL_URL;
 
 // Reglas tarifarias activas (los importes monetarios reales se leen de la DB)
-const MAX_NIGHTS = 365; // techo razonable para una estancia corta
 const MAX_GUESTS = 6;
 const MAX_ADVANCE_MONTHS = 18; // nadie puede reservar a más de 18 meses vista
 const HOLD_MINUTES = 35; // un poco más que la expiración de la sesión de Stripe (30 min)
