@@ -46,8 +46,18 @@ assert(
   "admin updates must send the edited minimum stay to the server",
 );
 assert(
-  !taxSettings.includes("minimum_nights: 10"),
-  "admin updates must not introduce a second hard-coded minimum source",
+  taxSettings.includes("minimum_nights: 10"),
+  "admin pricing settings must define a valid minimum-stay fallback",
+);
+assert(
+  taxSettings.includes(
+    "minimumNightsInput.value = DEFAULT_RATES.minimum_nights",
+  ),
+  "loading fallback and Reset must populate the required minimum stay",
+);
+assert(
+  !taxSettings.includes("minimum_nights: 0"),
+  "the admin fallback must not use an invalid minimum stay",
 );
 
 const priceDisplayStart = booking.indexOf("async function updatePriceDisplay()");
