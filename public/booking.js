@@ -243,7 +243,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ============ PRECIO ============
 
+  let priceRequestSequence = 0;
+
   async function updatePriceDisplay() {
+    const requestSequence = ++priceRequestSequence;
     const checkInDate = checkinPicker.selectedDates[0];
     const checkOutDate = checkoutPicker.selectedDates[0];
 
@@ -278,8 +281,11 @@ document.addEventListener("DOMContentLoaded", () => {
         }),
       });
 
+      if (requestSequence !== priceRequestSequence) return;
+
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
+        if (requestSequence !== priceRequestSequence) return;
         if (bookingMessage) {
           bookingMessage.textContent = error.error || "Failed to calculate price";
           bookingMessage.className = "booking-message error";
@@ -288,6 +294,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       const pricing = await response.json();
+      if (requestSequence !== priceRequestSequence) return;
       const cleaningRow =
         pricing.cleaning_fee > 0
           ? `
@@ -319,6 +326,7 @@ document.addEventListener("DOMContentLoaded", () => {
           `;
       }
     } catch (error) {
+      if (requestSequence !== priceRequestSequence) return;
       if (priceDisplay) priceDisplay.innerHTML = "";
       if (bookingMessage) {
         bookingMessage.textContent = "Unable to calculate price. Please try again.";

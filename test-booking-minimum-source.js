@@ -165,5 +165,18 @@ assert(
   ),
   "a rejected quote must be presented as a visible booking error",
 );
+assert(
+  booking.includes("let priceRequestSequence = 0;"),
+  "pricing requests must have a monotonic sequence guard",
+);
+assert(
+  priceDisplaySource.includes("const requestSequence = ++priceRequestSequence;"),
+  "each pricing refresh must invalidate every older request",
+);
+assert(
+  (priceDisplaySource.match(/requestSequence !== priceRequestSequence/g) || [])
+    .length >= 4,
+  "stale success, rejection, JSON and network-error paths must not update the UI",
+);
 
 console.log("booking minimum-night source-of-truth check passed");
