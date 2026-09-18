@@ -33,3 +33,14 @@ Issue #14 is complete only after the authoritative Render service is verified ag
 This document is Lead release-coordination evidence. It does not claim deployment success for `a7fe73ab7ebe1df2ba3376ae4bb0804f117b493e`.
 
 Next action: resolve/verify Issue #15, confirm the Render workspace and perform the production verification checklist. No merge, deployment, secret change or production-data mutation is authorized by this document.
+
+
+## Fresh production state
+
+Render workspace is now confirmed as `tea-dairtdjm8hqs73e23iv0`.
+
+The authoritative service attempted to auto-deploy current `main@a7fe73ab7ebe1df2ba3376ae4bb0804f117b493e` as deploy `dep-dam9k2ss728c73avljo0`. The build succeeded but runtime startup failed due Issue #15's sqlite3 native `GLIBC_2.38` incompatibility.
+
+Render retained the previous live revision `600faf72cafe9500e8da6c92b845f7816eac7919`. Its runtime connects to `/var/data/reservations.db` and starts successfully. Its logs also report `AIRBNB_ICAL_URL` is not configured.
+
+Issue #14 therefore cannot reach `VERIFIED` until Issue #15 is corrected and a reviewed current release revision deploys successfully.
