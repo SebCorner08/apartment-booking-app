@@ -2,7 +2,7 @@
 
 Implementation owner: `AGT-DATA-001`
 Coordinator: `AGT-LEAD-001`
-Dependency: Issue #15 must establish a stable deployable baseline first.
+Dependency: Issue #14 must verify the merged Issue #15 runtime fix in production before implementation begins.
 
 ## Current compatibility contract
 
@@ -67,7 +67,7 @@ Upstream:
 
 ## Proposed migration design
 
-1. Wait for Issue #15 to complete and establish the deployable baseline.
+1. Wait for Issue #14 to verify a successful production deploy of the merged Issue #15 runtime fix.
 2. Refresh this branch from that exact main revision.
 3. Add `better-sqlite3` and remove `sqlite3` only on this dedicated branch.
 4. Add a callback-compatibility adapter and route `server/database.js` through it.
@@ -110,3 +110,14 @@ Rollback:
 This is a planning/decision record only. `AGT-DATA-001` remains the implementation owner.
 
 After Issue #15 is complete, Data should validate the preferred driver against current upstream/runtime constraints, implement the adapter on this branch and post exact-head `RESULT_SUBMITTED` with migration/rollback evidence. Independent same-SHA `QA_CONFORM` remains required before any Copilot reviewer request. Raelvi final technical review remains last before Repository Owner merge authorization.
+
+
+## Post-merge sequencing — 2026-09-18
+
+Issue #15 has merged into `main@8ce680d8e6e3b61a9a714c144600e2425d397054`, but its production compatibility fix has not yet been proven by a successful Render deployment. Issue #14 now owns that verification gate.
+
+Accordingly:
+- this branch is synchronized to the merged application baseline;
+- Data implementation remains blocked until #14 confirms the current SQLite driver/runtime path actually deploys successfully;
+- after #14 reaches `VERIFIED`, AGT-DATA-001 may implement the maintained-driver migration on this same branch using the documented compatibility adapter, migration/rollback plan and test matrix;
+- do not use Issue #56 as a workaround for the still-unverified production release.
