@@ -1,45 +1,20 @@
 # Issue #15 — Dependency remediation and Render runtime diagnosis
 
-Implementation owner: AGT-QA-001
-Coordinator: AGT-LEAD-001
+Implementation owner: `AGT-LEAD-001` under the explicit Repository Owner exception authorizing Lead implementation of Issue #15
+Independent QA: `AGT-QA-001` required on the exact final candidate; Lead may not self-issue `QA_CONFORM`
+Coordinator: `AGT-LEAD-001`
 Baseline synchronized: `a7fe73ab7ebe1df2ba3376ae4bb0804f117b493e`
 
 ## Completed dependency-remediation context
 
-The dependency vulnerability remediation was previously integrated into `main`, including the sqlite3 upgrade and CI coverage. GitHub CI has demonstrated successful install/test execution on its configured Node 22 environment.
+The dependency vulnerability remediation was previously integrated into `main`, including the sqlite3 upgrade and CI coverage. GitHub CI demonstrated successful install/test execution on its configured Node 22 environment, while Render production startup regressed after the sqlite3 upgrade.
 
-Issue #15 remains open because earlier Render deploys after that remediation were recorded as failed and the exact Render failure phase/runtime was not captured in GitHub status metadata.
-
-## Required evidence before another dependency/runtime change
-
-AGT-QA-001 must obtain or reproduce the actual failure rather than changing dependencies from hypothesis:
-
-1. Confirm the intended Render workspace before querying workspace-scoped logs.
-2. Record the exact failed deploy and selected Node runtime.
-3. Identify the failing phase: dependency install, sqlite3 native load, server startup or health check.
-4. Reproduce with isolated data:
-   - `npm ci` or the exact Render build command;
-   - `node -e 'require("sqlite3")'`;
-   - isolated `node server/index.js` startup with non-production secrets and temporary SQLite data.
-5. Compare the Render-selected runtime with the CI Node 22 runtime.
-6. Preserve the vulnerability-remediation objective; do not downgrade sqlite3 or weaken audit posture solely to make deployment pass.
-7. If a runtime pin/bound is required, make the smallest evidence-backed change and align CI with the intended production runtime.
-8. Run `npm audit`, the complete relevant test suite and startup verification on the exact successor SHA.
-
-## Process state
-
-This file is Lead diagnosis coordination only. It is not AGT-QA-001 `RESULT_SUBMITTED`.
-
-Next action: AGT-QA-001 must inspect/adopt this branch and produce the evidence-backed successor candidate. Per Repository Owner instruction, exact-head independent `QA_CONFORM` is required before any Copilot reviewer request. Raelvi final technical review follows on the unchanged cleared head.
-
-No Copilot implementation, production deployment, secret change or production-data mutation is authorized by this document.
+Issue #15 remains open because the production runtime path must be made deterministic and compatible without restoring the known high/critical dependency findings.
 
 ## Exact Render failure established
 
 Workspace: `tea-dairtdjm8hqs73e23iv0`
 Authoritative service: `srv-daj8qnu7bikc73b4q070`
-
-The diagnosis is no longer waiting on Render logs.
 
 Last successful production deploy:
 - commit `600faf72cafe9500e8da6c92b845f7816eac7919`;
@@ -52,39 +27,55 @@ Last successful production deploy:
 First failed remediation deploy:
 - commit `9d4ab64f853afa8575e0a1df4bc8aef68d444a59`;
 - deploy `dep-dali3lvqj5pc73e051k0`;
-- Node `26.9.0`;
+- Node `26.9.0` selected from the previously unbounded `engines.node >=22.9.0` range;
 - install succeeded and audit reported 0 vulnerabilities;
-- runtime failed loading `sqlite3/build/Release/node_sqlite3.node`:
-  `GLIBC_2.38 not found` / `ERR_DLOPEN_FAILED`.
+- runtime failed loading `sqlite3/build/Release/node_sqlite3.node` with `GLIBC_2.38 not found` / `ERR_DLOPEN_FAILED`.
 
 Latest current-main deploy reproduces the same failure:
 - commit `a7fe73ab7ebe1df2ba3376ae4bb0804f117b493e`;
 - deploy `dep-dam9k2ss728c73avljo0`;
 - build successful, 0 vulnerabilities;
-- identical `GLIBC_2.38 not found` runtime failure.
+- identical `GLIBC_2.38 not found` sqlite3 startup failure;
+- Render retained the previous working revision.
 
-Therefore later authentication/pricing changes are not the root cause. The regression begins with the sqlite3 6.0.1 remediation revision.
+Therefore the production regression is tied to the sqlite3 6.0.1 native artifact path introduced by the dependency remediation. Later authentication/pricing changes are not the root cause.
 
-## Smallest remediation experiment
+## Submitted remediation
 
-Render's authoritative service currently builds with `npm install`, while repository bootstrap policy requires a lockfile-clean `npm ci` baseline. The installed `sqlite3@6.0.1` runs `prebuild-install -r napi || node-gyp rebuild` during installation.
+The submitted implementation keeps `sqlite3@6.0.1` and the remediated dependency set while making the production build path deterministic:
 
-`prebuild-install@7.1.3` explicitly treats `npm_config_build_from_source` as package-specific when its value equals the package name. Therefore the narrow deterministic experiment for AGT-QA-001 is:
+1. `package.json` bounds Node to `>=22.9.0 <23`, matching the Node 22 major validated by CI and preventing unbounded major-version drift.
+2. `render.yaml` uses:
 
-`npm_config_build_from_source=sqlite3 npm ci`
+   `npm ci && npm rebuild sqlite3 --build-from-source`
 
-This is preferable to the earlier generic `npm install --build-from-source=sqlite3` handoff because it:
-- uses the exact lockfile rather than allowing dependency resolution drift;
-- forces source compilation only for `sqlite3`, not every native dependency;
-- skips the incompatible sqlite3 prebuilt download and falls through to `node-gyp rebuild` against Render's native Debian environment;
-- preserves `sqlite3@6.0.1` and the zero-known-audit-vulnerability remediation objective.
+   This preserves a lockfile-clean install and then replaces the incompatible sqlite3 prebuilt with a native source build against the Render build environment.
+3. `.github/workflows/test.yml` runs the same sqlite3 source rebuild, verifies `require("sqlite3")`, enforces `npm audit --audit-level=high` and runs the full regression suite.
 
-Evidence basis:
-- `sqlite3@6.0.1` declares `prebuild-install ^7.1.3`, `node-gyp 12.x` and install script `prebuild-install -r napi || node-gyp rebuild`;
-- `prebuild-install@7.1.3` sets `buildFromSource` when `npm_config_build_from_source === pkg.name` or `=== "true"`.
+A package-specific install-time source-build form (`npm_config_build_from_source=sqlite3 npm ci`) was also investigated because `prebuild-install@7.1.3` recognizes the package name in `npm_config_build_from_source`. The submitted candidate instead uses the explicit post-install `npm rebuild sqlite3 --build-from-source` sequence because that exact path is exercised by CI and is easy to verify independently.
 
-Separately, bound `engines.node` to the CI-tested Node 22 major (for example `>=22.9.0 <23`) to eliminate unbounded Node-major drift. The Node bound is reproducibility hardening; it is not by itself the GLIBC fix.
+## Exact-head evidence requirement
 
-Required exact-head evidence remains: clean lockfile install, `npm audit`, `node -e 'require("sqlite3")'`, isolated startup, full tests and then owner `RESULT_SUBMITTED`.
+For the exact final candidate, required evidence is:
+- clean `npm ci`;
+- sqlite3 source rebuild;
+- `node -e 'require("sqlite3")'` native-load verification;
+- `npm audit --audit-level=high`;
+- full isolated regression tests;
+- independent same-SHA `QA_CONFORM` before any Copilot reviewer request.
 
-Known residual risk to include in `RESULT_SUBMITTED`: upstream `node-sqlite3` and its `prebuild-install` mechanism are currently deprecated/unmaintained, so any longer-term database-library migration belongs in separate follow-up scope rather than this P1 compatibility repair.
+No production deployment is part of this PR. Runtime verification on Render belongs to Issue #14 only after the required review chain, separate Repository Owner merge authorization and separate production deployment authorization.
+
+## Process state
+
+`AGT-LEAD-001`, acting under the explicit Repository Owner exception for Issue #15, owns the implementation and must post `RESULT_SUBMITTED` for the exact final candidate.
+
+`AGT-QA-001` is the required independent QA actor for this Lead-owned candidate and must post `QA_CONFORM` or concrete findings on the same SHA. `AGT-DATA-001` should separately inspect the persistence-sensitive runtime change for database/persistence semantic preservation but does not own implementation or fixes.
+
+Only after implementation-owner `RESULT_SUBMITTED` plus independent same-SHA `QA_CONFORM` may Copilot be explicitly requested as reviewer-only. Copilot findings return to the implementation owner and Copilot must not implement fixes. Material changes require renewed affected QA and a fresh Copilot review. Raelvi (`raelvim`) performs final technical review on the exact unchanged cleared head after Copilot disposition.
+
+No merge, production deployment, secret/environment change, destructive migration or production-data mutation is authorized by this document.
+
+## Residual maintenance risk
+
+Upstream `node-sqlite3` and its `prebuild-install` mechanism are currently deprecated/unmaintained. The immediate Issue #15 repair intentionally does not broaden into a database-driver migration. That longer-term maintenance and supply-chain risk is tracked separately in Issue #56 / PR #57 with `AGT-DATA-001` as implementation owner.
