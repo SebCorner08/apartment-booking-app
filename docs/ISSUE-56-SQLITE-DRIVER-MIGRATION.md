@@ -29,6 +29,12 @@ Why it is the leading candidate:
 - uses the same SQLite database file format, so the existing `/var/data/reservations.db` can remain in place;
 - supports prepared statements and explicit transactions.
 
+Fresh upstream verification on 2026-09-18:
+- latest upstream release is `v13.0.3`, published 2026-08-05;
+- that exact release declares `engines.node: >=22`, which is compatible with the Node 22 production target currently proposed by Issue #15;
+- its published package includes platform-specific exports/prebuild content for Linux x64/arm64, Linux musl, macOS and Windows;
+- because Issue #15 exposed a real native-binary/glibc incompatibility, Data must still verify the exact `better-sqlite3` Linux x64 artifact on the Render runtime before treating prebuilt availability as sufficient evidence.
+
 Tradeoff:
 - its native API is synchronous, unlike the current callback-style node-sqlite3 API.
 
@@ -36,20 +42,28 @@ Recommended approach:
 - introduce `server/sqlite-adapter.js` that exposes the small callback-compatible surface already consumed by this repository;
 - keep existing routes/services unchanged initially;
 - implement `run/get/all/serialize/close` compatibility plus `changes/lastID` callback context;
-- preserve explicit SQL transaction statements and current bootstrap ordering.
+- preserve explicit SQL transaction statements and current bootstrap ordering;
+- make a clean-install/native-load check on the exact Render-compatible Node/runtime part of the Data-owner validation matrix before implementation is submitted.
 
 Upstream:
 - https://github.com/WiseLibs/better-sqlite3
-- https://github.com/WiseLibs/better-sqlite3/releases
+- https://github.com/WiseLibs/better-sqlite3/releases/tag/v13.0.3
+- https://github.com/WiseLibs/better-sqlite3/blob/v13.0.3/package.json
 
 ### 2. Node built-in node:sqlite — monitor, not preferred for this migration yet
 
 Node provides `node:sqlite` without a third-party package. It removes a third-party native packaging dependency, but the current Node documentation still marks SQLite as release-candidate stability rather than stable. Its API is also synchronous and would need the same adapter work.
 
+Fresh runtime verification on 2026-09-18:
+- Node 22 and Node 24 are both currently LTS lines;
+- Node 26 is the current line;
+- `node:sqlite` is still Stability `1.2` (Release candidate) in current Node documentation, including Node 26.9.0-era docs, so moving to a newer runtime does not yet eliminate the API-stability concern.
+
 Because Issue #15 intentionally aligns production to Node 22.x, adopting `node:sqlite` now would couple this persistence migration to a still-evolving runtime API. Re-evaluate when Node's SQLite API reaches stable status on the production Node line.
 
 Upstream:
 - https://nodejs.org/api/sqlite.html
+- https://nodejs.org/en/about/previous-releases
 
 ## Proposed migration design
 
@@ -88,6 +102,7 @@ Rollback:
 - overlapping booking/hold transaction behavior;
 - hold release/confirm behavior;
 - persistent database path behavior;
+- clean install plus native-driver load on the exact production-target Node/runtime environment;
 - full current `npm test` suite.
 
 ## Process state
