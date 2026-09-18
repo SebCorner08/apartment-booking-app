@@ -12,8 +12,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: npm
+      - name: Verify manifest and lockfile runtime metadata
+        run: node -e "const pkg=require('./package.json'); const lock=require('./package-lock.json'); if (pkg.engines.node !== lock.packages[''].engines.node) { console.error('package.json and package-lock.json engines.node differ'); process.exit(1); }"
       - run: npm ci
       - name: Rebuild sqlite3 from source
         run: npm rebuild sqlite3 --build-from-source
