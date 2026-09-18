@@ -12,6 +12,13 @@ const WebSocket = require("ws");
 const ical = require("node-ical");
 
 const db = require("./database.js");
+const {
+  DEFAULT_PRICING,
+  MAX_NIGHTS,
+  normalizePricingRow,
+  mergePricingSettings,
+  validateRequiredTaxUpdate,
+} = require("./pricing-settings.js");
 
 // Stripe se inicializa solo si hay clave real; en modo mock no se necesita.
 let stripe = null;
@@ -27,22 +34,23 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const DOMAIN = process.env.DOMAIN;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const AIRBNB_ICAL_URL = process.env.AIRBNB_ICAL_URL;
+const ADMIN_SESSION_MINUTES = 60;
+const ADMIN_COOKIE_NAME = "admin_session";
+const ADMIN_WS_PATH = "/admin-updates";
+const ADMIN_WS_PROTOCOL = "admin-updates";
+const ADMIN_WS_TICKET_PREFIX = "admin-ticket.";
+const ADMIN_WS_TICKET_TTL_MS = 15 * 1000;
+const adminWebSocketTickets = new Map();
 
 // Reglas tarifarias activas (los importes monetarios reales se leen de la DB)
-const MIN_NIGHTS = 10;
-const MAX_NIGHTS = 365; // techo razonable para una estancia corta
 const MAX_GUESTS = 6;
 const MAX_ADVANCE_MONTHS = 18; // nadie puede reservar a más de 18 meses vista
-const CLEANING_FEE = parseFloat(process.env.CLEANING_FEE) || 0;
 const HOLD_MINUTES = 35; // un poco más que la expiración de la sesión de Stripe (30 min)
 
 // Modo de prueba sin Stripe real: nunca se activa en producción, aunque la variable quede puesta por error.
 const MOCK_PAYMENTS =
   NODE_ENV !== "production" && process.env.MOCK_PAYMENTS === "true";
 const mockSessions = new Map(); // sesiones falsas en memoria, solo para MOCK_PAYMENTS
-
-// Servir archivos estáticos desde public/
-app.use(express.static(path.join(__dirname, "..", "public")));
 
 // No arrancar sin secretos configurados: evita contraseñas/JWT por defecto inseguros
 if (!ADMIN_PASSWORD || !JWT_SECRET) {
@@ -59,10 +67,48 @@ if (MOCK_PAYMENTS) {
 }
 
 app.set("trust proxy", 1);
-// El sitio usa scripts inline y varios CDNs (Font Awesome, Google Fonts, Swiper),
-// así que se desactiva la CSP por defecto de helmet para no romper la página;
-// las demás cabeceras de seguridad (X-Frame-Options, etc.) se mantienen.
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'self'"],
+        imgSrc: ["'self'", "data:", "https:"],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://cdnjs.cloudflare.com",
+          "https://cdn.jsdelivr.net",
+          "https://unpkg.com",
+          "https://fonts.googleapis.com",
+        ],
+        fontSrc: [
+          "'self'",
+          "data:",
+          "https://cdnjs.cloudflare.com",
+          "https://fonts.gstatic.com",
+        ],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://cdnjs.cloudflare.com",
+          "https://cdn.jsdelivr.net",
+          "https://unpkg.com",
+          "https://elfsightcdn.com",
+        ],
+        frameSrc: ["'self'", "https://*.elfsight.com"],
+        connectSrc: [
+          "'self'",
+          "https://escapelakenorman-api-l2da.onrender.com",
+          "wss://escapelakenorman-api-l2da.onrender.com",
+          "https://*.elfsight.com",
+        ],
+      },
+    },
+  }),
+);
 
 // Restringe qué orígenes pueden llamar a la API (evita que otros sitios usen tokens robados)
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || DOMAIN || "")
@@ -70,9 +116,21 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || DOMAIN || "")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+function isAllowedOrigin(origin) {
+  if (!origin) return NODE_ENV !== "production";
+  if (allowedOrigins.includes(origin)) return true;
+  return (
+    NODE_ENV !== "production" &&
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+  );
+}
+
 app.use(
   cors({
-    origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+    origin(origin, callback) {
+      callback(null, isAllowedOrigin(origin));
+    },
+    credentials: true,
   }),
 );
 
@@ -119,9 +177,43 @@ const checkoutLimiter = rateLimit({
 });
 
 // ============ AUTENTICACIÓN ============
+function readCookie(req, name) {
+  const cookieHeader = req.headers.cookie || "";
+  for (const pair of cookieHeader.split(";")) {
+    const separator = pair.indexOf("=");
+    if (separator === -1) continue;
+    const key = pair.slice(0, separator).trim();
+    if (key === name) {
+      try {
+        return decodeURIComponent(pair.slice(separator + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function adminCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: NODE_ENV === "production",
+    sameSite: NODE_ENV === "production" ? "none" : "lax",
+    maxAge: ADMIN_SESSION_MINUTES * 60 * 1000,
+    path: "/",
+  };
+}
+
 const checkAdminAuth = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
+  const origin = req.headers.origin;
+  if (
+    !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
+    !isAllowedOrigin(origin)
+  ) {
+    return res.sendStatus(403);
+  }
+
+  const token = readCookie(req, ADMIN_COOKIE_NAME);
 
   if (!token) return res.sendStatus(401);
 
@@ -132,6 +224,57 @@ const checkAdminAuth = (req, res, next) => {
   });
 };
 
+function purgeExpiredAdminWebSocketTickets(now = Date.now()) {
+  for (const [ticket, record] of adminWebSocketTickets) {
+    if (record.expiresAt <= now || record.sessionExpiresAt <= now) {
+      adminWebSocketTickets.delete(ticket);
+    }
+  }
+}
+
+function issueAdminWebSocketTicket(origin, user) {
+  const now = Date.now();
+  purgeExpiredAdminWebSocketTickets(now);
+
+  const sessionExpiresAt = Number(user && user.exp) * 1000;
+  if (!Number.isFinite(sessionExpiresAt) || sessionExpiresAt <= now) {
+    return null;
+  }
+
+  const ticket = crypto.randomBytes(32).toString("base64url");
+  adminWebSocketTickets.set(ticket, {
+    origin: origin || null,
+    expiresAt: now + ADMIN_WS_TICKET_TTL_MS,
+    sessionExpiresAt,
+  });
+  return ticket;
+}
+
+function consumeAdminWebSocketTicket(ticket, origin) {
+  const now = Date.now();
+  purgeExpiredAdminWebSocketTickets(now);
+  const record = adminWebSocketTickets.get(ticket);
+
+  if (!record || record.origin !== (origin || null)) return null;
+
+  adminWebSocketTickets.delete(ticket);
+  return record;
+}
+
+function parseWebSocketProtocols(request) {
+  return String(request.headers["sec-websocket-protocol"] || "")
+    .split(",")
+    .map((protocol) => protocol.trim())
+    .filter(Boolean);
+}
+
+function rejectWebSocketUpgrade(socket, statusCode, statusText) {
+  socket.write(
+    `HTTP/1.1 ${statusCode} ${statusText}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+  );
+  socket.destroy();
+}
+
 // ============ FUNCIONES AUXILIARES ============
 
 /**
@@ -141,9 +284,8 @@ const checkAdminAuth = (req, res, next) => {
  */
 function getTaxConfig() {
   return {
-    mecklenburg_sales: parseFloat(process.env.TAX_MECKLENBURG_SALES) || 8.25,
-    mecklenburg_occupancy:
-      parseFloat(process.env.TAX_MECKLENBURG_OCCUPANCY) || 8.0,
+    mecklenburg_sales: DEFAULT_PRICING.mecklenburg_sales,
+    mecklenburg_occupancy: DEFAULT_PRICING.mecklenburg_occupancy,
   };
 }
 
@@ -154,7 +296,7 @@ function getTaxConfig() {
 function calculateTotalPrice(
   nights,
   pricePerNight,
-  cleaningFee = CLEANING_FEE,
+  cleaningFee = DEFAULT_PRICING.cleaning_fee,
   taxRates = null,
 ) {
   if (!taxRates) taxRates = getTaxConfig();
@@ -223,67 +365,68 @@ function calculateMonthlyPrice(months, monthlyRate, taxRates = null) {
  * Intenta usar las nuevas columnas mecklenburg_sales/mecklenburg_occupancy;
  * si no existen (base de datos antigua), cae a los defaults.
  */
-function loadTaxSettingsFromDB(callback) {
+function getLatestPricingRow() {
   const sql = `
-    SELECT mecklenburg_sales, mecklenburg_occupancy,
-           nc_state, mecklenburg_local, occupancy
-    FROM tax_settings 
-    ORDER BY updated_at DESC 
+    SELECT nightly_rate, monthly_rate, cleaning_fee, minimum_nights,
+           mecklenburg_sales, mecklenburg_occupancy
+    FROM tax_settings
+    ORDER BY updated_at DESC, id DESC
     LIMIT 1
   `;
-
-  db.get(sql, [], (err, row) => {
-    if (err) {
-      console.error("Error loading tax settings:", err);
-      callback(getTaxConfig());
-      return;
-    }
-
-    if (row) {
-      // Preferir columnas nuevas; si son null (DB vieja), usar defaults
-      callback({
-        mecklenburg_sales:
-          row.mecklenburg_sales != null ? row.mecklenburg_sales : 8.25,
-        mecklenburg_occupancy:
-          row.mecklenburg_occupancy != null ? row.mecklenburg_occupancy : 8.0,
-      });
-    } else {
-      callback(getTaxConfig());
-    }
-  });
+  return db.pricingReady.then(
+    () =>
+      new Promise((resolve, reject) => {
+        db.get(sql, [], (err, row) => (err ? reject(err) : resolve(row)));
+      }),
+  );
 }
 
 /**
  * Carga tarifas e impuestos desde la base de datos del servidor.
  * Esta es la ÚNICA fuente de precios: nunca se usan valores enviados por el navegador.
+ * Database errors propagate so checkout fails closed instead of charging defaults.
  */
-function loadRatesFromDB(callback) {
-  const sql = `
-    SELECT nightly_rate, monthly_rate, mecklenburg_sales, mecklenburg_occupancy
-    FROM tax_settings
-    ORDER BY updated_at DESC
-    LIMIT 1
-  `;
-  db.get(sql, [], (err, row) => {
-    if (err) {
-      console.error("Error loading rates:", err);
-      return callback({
-        nightly_rate: 150,
-        monthly_rate: 1800,
-        ...getTaxConfig(),
-      });
-    }
-    callback({
-      nightly_rate: row && row.nightly_rate != null ? row.nightly_rate : 150,
-      monthly_rate: row && row.monthly_rate != null ? row.monthly_rate : 1800,
-      mecklenburg_sales:
-        row && row.mecklenburg_sales != null ? row.mecklenburg_sales : 8.25,
-      mecklenburg_occupancy:
-        row && row.mecklenburg_occupancy != null
-          ? row.mecklenburg_occupancy
-          : 8.0,
+async function loadRatesFromDB() {
+  return normalizePricingRow(await getLatestPricingRow());
+}
+
+async function loadTaxSettingsFromDB() {
+  const rates = await loadRatesFromDB();
+  return {
+    mecklenburg_sales: rates.mecklenburg_sales,
+    mecklenburg_occupancy: rates.mecklenburg_occupancy,
+  };
+}
+
+let pricingUpdateQueue = Promise.resolve();
+
+function savePricingSettings(updates) {
+  const operation = pricingUpdateQueue.then(async () => {
+    const pricing = mergePricingSettings(await getLatestPricingRow(), updates);
+    await new Promise((resolve, reject) => {
+      db.run(
+        `INSERT INTO tax_settings (
+           nc_state, mecklenburg_local, occupancy,
+           nightly_rate, monthly_rate, cleaning_fee, minimum_nights,
+           mecklenburg_sales, mecklenburg_occupancy, updated_at
+         ) VALUES (0, 0, 0, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        [
+          pricing.nightly_rate,
+          pricing.monthly_rate,
+          pricing.cleaning_fee,
+          pricing.minimum_nights,
+          pricing.mecklenburg_sales,
+          pricing.mecklenburg_occupancy,
+        ],
+        (err) => (err ? reject(err) : resolve()),
+      );
     });
+    return pricing;
   });
+
+  // Keep the queue usable after a rejected validation or database operation.
+  pricingUpdateQueue = operation.catch(() => {});
+  return operation;
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -457,19 +600,23 @@ app.get("/api/bookings", (req, res) => {
 });
 
 // Endpoint para obtener tasas de impuestos actuales
-app.get("/api/tax-rates", (req, res) => {
-  loadTaxSettingsFromDB((rates) => {
-    res.json(rates);
-  });
+app.get("/api/tax-rates", async (req, res) => {
+  try {
+    res.json(await loadTaxSettingsFromDB());
+  } catch (err) {
+    console.error("Error loading tax settings:", err);
+    res.status(503).json({ error: "Pricing configuration unavailable" });
+  }
 });
 
 // Endpoint para calcular precio total (con impuestos).
 // Las tarifas se leen SIEMPRE de la base de datos del servidor; cualquier
 // pricePerNight/monthly_rate/subtotal/total enviado por el navegador se ignora.
-app.post("/api/calculate-price", (req, res) => {
+app.post("/api/calculate-price", async (req, res) => {
   const { checkIn, checkOut, rental_type, months } = req.body;
 
-  loadRatesFromDB((rates) => {
+  try {
+    const rates = await loadRatesFromDB();
     // Arriendo mensual
     if (rental_type === "monthly") {
       const monthsInt = parseInt(months, 10);
@@ -488,15 +635,23 @@ app.post("/api/calculate-price", (req, res) => {
         .status(400)
         .json({ error: "Missing or invalid check-in/check-out dates" });
     }
-    if (nights < MIN_NIGHTS) {
+    if (nights > MAX_NIGHTS) {
       return res
         .status(400)
-        .json({ error: `Minimum stay is ${MIN_NIGHTS} nights` });
+        .json({ error: `Maximum stay is ${MAX_NIGHTS} nights` });
+    }
+    if (nights < rates.minimum_nights) {
+      return res
+        .status(400)
+        .json({ error: `Minimum stay is ${rates.minimum_nights} nights` });
     }
     res.json(
-      calculateTotalPrice(nights, rates.nightly_rate, CLEANING_FEE, rates),
+      calculateTotalPrice(nights, rates.nightly_rate, rates.cleaning_fee, rates),
     );
-  });
+  } catch (err) {
+    console.error("Error loading rates:", err);
+    res.status(503).json({ error: "Pricing configuration unavailable" });
+  }
 });
 
 // Endpoint para crear sesión de pago Stripe.
@@ -567,11 +722,7 @@ app.post("/api/create-checkout-session", checkoutLimiter, async (req, res) => {
         error: `Bookings can only be made up to ${MAX_ADVANCE_MONTHS} months in advance`,
       });
     }
-    if (nights < MIN_NIGHTS) {
-      return res
-        .status(400)
-        .json({ error: `Minimum stay is ${MIN_NIGHTS} nights` });
-    }
+    // The effective minimum is checked after loading the authoritative DB row.
     if (nights > MAX_NIGHTS) {
       return res
         .status(400)
@@ -582,11 +733,21 @@ app.post("/api/create-checkout-session", checkoutLimiter, async (req, res) => {
   let holdId = null;
   try {
     // Tarifas e impuestos desde la base de datos del servidor
-    const rates = await new Promise((resolve) => loadRatesFromDB(resolve));
+    const rates = await loadRatesFromDB();
+    if (rental_type !== "monthly" && nights < rates.minimum_nights) {
+      return res
+        .status(400)
+        .json({ error: `Minimum stay is ${rates.minimum_nights} nights` });
+    }
     const pricing =
       rental_type === "monthly"
         ? calculateMonthlyPrice(monthsInt, rates.monthly_rate, rates)
-        : calculateTotalPrice(nights, rates.nightly_rate, CLEANING_FEE, rates);
+        : calculateTotalPrice(
+            nights,
+            rates.nightly_rate,
+            rates.cleaning_fee,
+            rates,
+          );
 
     // Validar que el importe final sea válido y mayor que cero
     if (!pricing.total || pricing.total <= 0) {
@@ -791,11 +952,36 @@ app.post("/api/admin/login", loginLimiter, (req, res) => {
 
   if (password === ADMIN_PASSWORD) {
     const user = { name: "admin", role: "admin" };
-    const token = jwt.sign(user, JWT_SECRET, { expiresIn: "24h" });
-    res.json({ token, user });
+    const token = jwt.sign(user, JWT_SECRET, {
+      expiresIn: `${ADMIN_SESSION_MINUTES}m`,
+    });
+    res.cookie(ADMIN_COOKIE_NAME, token, adminCookieOptions());
+    res.json({
+      user,
+      session_expires_in_minutes: ADMIN_SESSION_MINUTES,
+    });
   } else {
     res.status(401).json({ error: "Invalid password" });
   }
+});
+
+app.post("/api/admin/logout", (req, res) => {
+  if (!isAllowedOrigin(req.headers.origin)) return res.sendStatus(403);
+  const options = adminCookieOptions();
+  delete options.maxAge;
+  res.clearCookie(ADMIN_COOKIE_NAME, options);
+  res.sendStatus(204);
+});
+
+app.post("/api/admin/websocket-ticket", checkAdminAuth, (req, res) => {
+  const ticket = issueAdminWebSocketTicket(req.headers.origin, req.user);
+  if (!ticket) return res.sendStatus(401);
+
+  res.set("Cache-Control", "no-store");
+  res.json({
+    ticket,
+    expires_in_seconds: ADMIN_WS_TICKET_TTL_MS / 1000,
+  });
 });
 
 // Obtener todas las reservas (requiere autenticación)
@@ -847,136 +1033,76 @@ app.delete("/api/admin/bookings/:id", checkAdminAuth, (req, res) => {
 
 // ============ MONTHLY RATE ENDPOINTS ============
 
-// Obtener tarifa mensual
-app.get("/api/monthly-rate", (req, res) => {
-  loadTaxSettingsFromDB((rates) => {
-    // El monthly_rate viene de la DB; si no existe, usar default
-    db.get(
-      `SELECT monthly_rate FROM tax_settings ORDER BY updated_at DESC LIMIT 1`,
-      [],
-      (err, row) => {
-        const monthlyRate =
-          row && row.monthly_rate != null ? row.monthly_rate : 1800;
-        res.json({ monthly_rate: monthlyRate });
-      },
-    );
-  });
+// Compatibility endpoints backed by the same complete pricing snapshot.
+app.get("/api/monthly-rate", async (req, res) => {
+  try {
+    const rates = await loadRatesFromDB();
+    res.json({ monthly_rate: rates.monthly_rate });
+  } catch (err) {
+    console.error("Error loading monthly rate:", err);
+    res.status(503).json({ error: "Pricing configuration unavailable" });
+  }
 });
 
-// Obtener configuración de tarifa mensual (admin)
-app.get("/api/admin/monthly-rate", checkAdminAuth, (req, res) => {
-  db.get(
-    `SELECT monthly_rate FROM tax_settings ORDER BY updated_at DESC LIMIT 1`,
-    [],
-    (err, row) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      res.json({
-        monthly_rate: row && row.monthly_rate != null ? row.monthly_rate : 1800,
-      });
-    },
-  );
+app.get("/api/admin/monthly-rate", checkAdminAuth, async (req, res) => {
+  try {
+    const rates = await loadRatesFromDB();
+    res.json({ monthly_rate: rates.monthly_rate });
+  } catch (err) {
+    console.error("Error loading monthly rate:", err);
+    res.status(503).json({ error: "Pricing configuration unavailable" });
+  }
 });
 
-// Actualizar tarifa mensual (admin)
-app.post("/api/admin/monthly-rate", checkAdminAuth, (req, res) => {
+app.post("/api/admin/monthly-rate", checkAdminAuth, async (req, res) => {
   const { monthly_rate } = req.body;
-  if (monthly_rate === undefined || monthly_rate <= 0) {
+  if (monthly_rate === undefined || monthly_rate === null) {
     return res.status(400).json({ error: "Invalid monthly rate" });
   }
-  // Actualizar el registro más reciente de tax_settings
-  db.run(
-    `UPDATE tax_settings SET monthly_rate = ? WHERE id = (SELECT id FROM tax_settings ORDER BY updated_at DESC LIMIT 1)`,
-    [monthly_rate],
-    function (err) {
-      if (err) {
-        // Si no existe registro, crear uno con defaults
-        db.run(
-          `INSERT INTO tax_settings (nc_state, mecklenburg_local, occupancy, mecklenburg_sales, mecklenburg_occupancy, monthly_rate, updated_at) VALUES (0, 0, 0, 8.25, 8.0, ?, datetime('now'))`,
-          [monthly_rate],
-          function (err2) {
-            if (err2) {
-              return res.status(500).json({ error: err2.message });
-            }
-            broadcastAdminUpdate();
-            res.json({ message: "Monthly rate updated", monthly_rate });
-          },
-        );
-      } else {
-        broadcastAdminUpdate();
-        res.json({ message: "Monthly rate updated", monthly_rate });
-      }
-    },
-  );
+  try {
+    const pricing = await savePricingSettings({ monthly_rate });
+    broadcastAdminUpdate();
+    res.json({
+      message: "Monthly rate updated",
+      monthly_rate: pricing.monthly_rate,
+    });
+  } catch (err) {
+    if (err instanceof TypeError) {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error("Error saving monthly rate:", err);
+    res.status(500).json({ error: "Unable to save pricing configuration" });
+  }
 });
 
 // ============ TAX SETTINGS ENDPOINTS ============
 
 // Obtener configuración de impuestos Mecklenburg
-app.get("/api/admin/tax-settings", checkAdminAuth, (req, res) => {
-  const sql = `
-    SELECT id, mecklenburg_sales, mecklenburg_occupancy, monthly_rate,
-           nc_state, mecklenburg_local, occupancy, updated_at
-    FROM tax_settings
-    ORDER BY updated_at DESC
-    LIMIT 1
-  `;
-
-  db.get(sql, [], (err, row) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-
-    if (row) {
-      res.json({
-        id: row.id,
-        mecklenburg_sales:
-          row.mecklenburg_sales != null ? row.mecklenburg_sales : 8.25,
-        mecklenburg_occupancy:
-          row.mecklenburg_occupancy != null ? row.mecklenburg_occupancy : 8.0,
-        monthly_rate: row.monthly_rate != null ? row.monthly_rate : 1800,
-        updated_at: row.updated_at,
-      });
-    } else {
-      res.json({ ...getTaxConfig(), monthly_rate: 1800 });
-    }
-  });
+app.get("/api/admin/tax-settings", checkAdminAuth, async (req, res) => {
+  try {
+    res.json(await loadRatesFromDB());
+  } catch (err) {
+    console.error("Error loading admin pricing settings:", err);
+    res.status(503).json({ error: "Pricing configuration unavailable" });
+  }
 });
 
-// Actualizar configuración de impuestos Mecklenburg
-app.post("/api/admin/tax-settings", checkAdminAuth, (req, res) => {
-  const { mecklenburg_sales, mecklenburg_occupancy, monthly_rate } = req.body;
-
-  if (mecklenburg_sales === undefined || mecklenburg_occupancy === undefined) {
-    return res.status(400).json({ error: "Missing tax rates" });
+// Actualizar la configuración tarifaria completa. Los campos omitidos se
+// conservan desde la última fila para que un cambio de impuestos nunca
+// restablezca silenciosamente la tarifa nocturna.
+app.post("/api/admin/tax-settings", checkAdminAuth, async (req, res) => {
+  try {
+    const updates = validateRequiredTaxUpdate(req.body);
+    const pricing = await savePricingSettings(updates);
+    broadcastAdminUpdate();
+    res.json({ message: "Pricing settings updated", ...pricing });
+  } catch (err) {
+    if (err instanceof TypeError) {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error("Error saving pricing settings:", err);
+    res.status(500).json({ error: "Unable to save pricing configuration" });
   }
-
-  const effectiveMonthlyRate = monthly_rate != null ? monthly_rate : 1800;
-
-  // Mantener columnas antiguas con valores por defecto para compatibilidad
-  const sql = `
-    INSERT INTO tax_settings (nc_state, mecklenburg_local, occupancy, mecklenburg_sales, mecklenburg_occupancy, monthly_rate, updated_at)
-    VALUES (0, 0, 0, ?, ?, ?, datetime('now'))
-  `;
-
-  db.run(
-    sql,
-    [mecklenburg_sales, mecklenburg_occupancy, effectiveMonthlyRate],
-    function (err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      broadcastAdminUpdate();
-      res.json({
-        message: "Tax settings updated",
-        id: this.lastID,
-        mecklenburg_sales,
-        mecklenburg_occupancy,
-        monthly_rate: effectiveMonthlyRate,
-      });
-    },
-  );
 });
 
 // ============ MANUAL BILLING ENDPOINTS ============
@@ -1222,13 +1348,71 @@ async function syncAirbnbCalendar() {
 // ============ SERVER ============
 const server = http.createServer(app);
 
-// WebSocket para notificar al panel admin en tiempo real (nuevas reservas, cancelaciones, sync)
-const wss = new WebSocket.Server({ server });
+// WebSocket autenticado para notificar al panel admin en tiempo real.
+// El navegador obtiene primero un ticket efímero mediante la cookie HttpOnly.
+const wss = new WebSocket.Server({
+  noServer: true,
+  handleProtocols(protocols) {
+    return protocols.has(ADMIN_WS_PROTOCOL) ? ADMIN_WS_PROTOCOL : false;
+  },
+});
+
+server.on("upgrade", (request, socket, head) => {
+  let requestUrl;
+  try {
+    requestUrl = new URL(
+      request.url,
+      `http://${request.headers.host || "localhost"}`,
+    );
+  } catch {
+    return rejectWebSocketUpgrade(socket, 400, "Bad Request");
+  }
+
+  if (requestUrl.pathname !== ADMIN_WS_PATH) {
+    return rejectWebSocketUpgrade(socket, 404, "Not Found");
+  }
+
+  const origin = request.headers.origin;
+  if (!isAllowedOrigin(origin)) {
+    return rejectWebSocketUpgrade(socket, 403, "Forbidden");
+  }
+
+  const protocols = parseWebSocketProtocols(request);
+  const ticketProtocol = protocols.find((protocol) =>
+    protocol.startsWith(ADMIN_WS_TICKET_PREFIX),
+  );
+  if (!protocols.includes(ADMIN_WS_PROTOCOL) || !ticketProtocol) {
+    return rejectWebSocketUpgrade(socket, 401, "Unauthorized");
+  }
+
+  const ticket = ticketProtocol.slice(ADMIN_WS_TICKET_PREFIX.length);
+  const ticketRecord = consumeAdminWebSocketTicket(ticket, origin);
+  if (!ticketRecord) {
+    return rejectWebSocketUpgrade(socket, 401, "Unauthorized");
+  }
+
+  wss.handleUpgrade(request, socket, head, (client) => {
+    client.isAdminAuthenticated = true;
+    client.adminSessionExpiresAt = ticketRecord.sessionExpiresAt;
+
+    const sessionTimer = setTimeout(
+      () => client.close(4001, "Admin session expired"),
+      Math.max(0, ticketRecord.sessionExpiresAt - Date.now()),
+    );
+    client.once("close", () => clearTimeout(sessionTimer));
+
+    wss.emit("connection", client, request);
+  });
+});
 
 function broadcastAdminUpdate() {
   const payload = JSON.stringify({ type: "bookings_updated" });
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
+    if (
+      client.isAdminAuthenticated &&
+      client.adminSessionExpiresAt > Date.now() &&
+      client.readyState === WebSocket.OPEN
+    ) {
       client.send(payload);
     }
   });
