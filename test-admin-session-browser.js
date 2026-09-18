@@ -6,6 +6,10 @@ const admin = fs.readFileSync("public/admin.html", "utf8");
 const taxSettings = fs.readFileSync("public/tax-settings.html", "utf8");
 const netlify = fs.readFileSync("netlify.toml", "utf8");
 const server = fs.readFileSync("server/index.js", "utf8");
+const adminWebSocket = fs.readFileSync(
+  "server/services/admin-websocket.js",
+  "utf8",
+);
 
 const renderOrigin = "https://escapelakenorman-api-l2da.onrender.com";
 const firstPartyApiPattern =
@@ -96,15 +100,19 @@ assert(
   "admin must present the scoped WebSocket ticket as a subprotocol",
 );
 assert(
-  server.includes("new WebSocket.Server({") &&
-    server.includes("noServer: true") &&
-    server.includes("consumeAdminWebSocketTicket(ticket, origin)"),
-  "server must authorize WebSocket upgrades before accepting clients",
+  server.includes("websocket.attachToServer(server)"),
+  "server composition must attach the extracted WebSocket service",
 );
 assert(
-  server.includes("client.isAdminAuthenticated") &&
-    server.includes("client.adminSessionExpiresAt > Date.now()"),
-  "server must broadcast admin updates only to authenticated live sessions",
+  adminWebSocket.includes("new WebSocket.Server({") &&
+    adminWebSocket.includes("noServer: true") &&
+    adminWebSocket.includes("const record = consumeTicket(ticket, origin)"),
+  "WebSocket service must authorize upgrades before accepting clients",
+);
+assert(
+  adminWebSocket.includes("client.isAdminAuthenticated") &&
+    adminWebSocket.includes("client.adminSessionExpiresAt > Date.now()"),
+  "WebSocket service must broadcast admin updates only to authenticated live sessions",
 );
 assert(
   netlify.includes('from = "/api/*"') &&
