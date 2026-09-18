@@ -43,3 +43,15 @@ This document is Lead operational-coordination evidence, not proof that the exte
 Next action: perform the retirement steps through an authorized Render control surface after explicit workspace confirmation, then record the final inventory in Issue #16.
 
 No deployment, secret change, database change or service deletion is performed by this document.
+
+
+## Fresh confirmed workspace inventory
+
+Workspace is confirmed as `tea-dairtdjm8hqs73e23iv0`.
+
+Current Render inventory:
+- `srv-daj8qnu7bikc73b4q070` / `escapelakenorman-api`: active, `main`, auto-deploy enabled, persistent disk mounted at `/var/data`;
+- `srv-dajh43gae00c739v1vr0` / `escapelakenorman-api-l2da`: suspended by user, auto-deploy still enabled;
+- `srv-daj05vgae00c7385b8p0` / `apartment-booking-app`: suspended by user, auto-deploy still enabled.
+
+Only the authoritative service is active. The remaining cleanup is exactly the two unchecked retirement items: disable auto-deploy and retire/delete the two suspended non-authoritative services. The connected Render actions still do not expose those service mutations.
