@@ -20,7 +20,7 @@ services:
     name: escapelakenorman-api
     runtime: node
     plan: 0.5c-512mb
-    buildCommand: npm install
+    buildCommand: npm install --build-from-source=sqlite3
     startCommand: node server/index.js
     healthCheckPath: /health
 

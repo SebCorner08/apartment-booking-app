@@ -15,5 +15,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Rebuild sqlite3 from source
+        run: npm rebuild sqlite3 --build-from-source
+      - name: Verify sqlite3 native load
+        run: node -e "require('sqlite3'); console.log('sqlite3 native load ok')"
       - name: Run test suite
         run: npm test
