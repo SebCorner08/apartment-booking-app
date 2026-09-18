@@ -7,7 +7,7 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "test:admin-session": "node test-admin-session-browser.js",
-    "test": "node test-repository-data-hygiene.js && node test-database-path.js && node test-stripe-webhook-durability.js && node test-pricing-settings.js && node test-booking-minimum-source.js && node test-runner.js",
+    "test": "node test-repository-data-hygiene.js && node test-database-path.js && node test-stripe-webhook-durability.js && node test-pricing-settings.js && node test-booking-minimum-source.js && node test-backend-modules.js && node test-runner.js",
     "test:persistence": "node test-database-path.js",
     "test:webhook": "node test-stripe-webhook-durability.js",
     "test:booking-minimum": "node test-booking-minimum-source.js",
