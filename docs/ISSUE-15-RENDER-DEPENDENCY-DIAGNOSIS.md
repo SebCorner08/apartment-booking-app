@@ -34,7 +34,6 @@ Next action: AGT-QA-001 must inspect/adopt this branch and produce the evidence-
 
 No Copilot implementation, production deployment, secret change or production-data mutation is authorized by this document.
 
-
 ## Exact Render failure established
 
 Workspace: `tea-dairtdjm8hqs73e23iv0`
@@ -68,14 +67,24 @@ Therefore later authentication/pricing changes are not the root cause. The regre
 
 ## Smallest remediation experiment
 
-Render documents that its native runtimes use Debian 12 and include the native compiler toolchain during builds and runtime. sqlite3 documents a supported source-build path.
+Render's authoritative service currently builds with `npm install`, while repository bootstrap policy requires a lockfile-clean `npm ci` baseline. The installed `sqlite3@6.0.1` runs `prebuild-install -r napi || node-gyp rebuild` during installation.
 
-AGT-QA-001 should test the narrow production build correction:
+`prebuild-install@7.1.3` explicitly treats `npm_config_build_from_source` as package-specific when its value equals the package name. Therefore the narrow deterministic experiment for AGT-QA-001 is:
 
-`npm install --build-from-source=sqlite3`
+`npm_config_build_from_source=sqlite3 npm ci`
 
-This should compile sqlite3 6.0.1 against Render's native Debian environment instead of consuming the incompatible upstream Linux prebuilt, while preserving the zero-audit-vulnerability dependency set.
+This is preferable to the earlier generic `npm install --build-from-source=sqlite3` handoff because it:
+- uses the exact lockfile rather than allowing dependency resolution drift;
+- forces source compilation only for `sqlite3`, not every native dependency;
+- skips the incompatible sqlite3 prebuilt download and falls through to `node-gyp rebuild` against Render's native Debian environment;
+- preserves `sqlite3@6.0.1` and the zero-known-audit-vulnerability remediation objective.
+
+Evidence basis:
+- `sqlite3@6.0.1` declares `prebuild-install ^7.1.3`, `node-gyp 12.x` and install script `prebuild-install -r napi || node-gyp rebuild`;
+- `prebuild-install@7.1.3` sets `buildFromSource` when `npm_config_build_from_source === pkg.name` or `=== "true"`.
 
 Separately, bound `engines.node` to the CI-tested Node 22 major (for example `>=22.9.0 <23`) to eliminate unbounded Node-major drift. The Node bound is reproducibility hardening; it is not by itself the GLIBC fix.
 
-Required exact-head evidence remains: audit, install, `require("sqlite3")`, isolated startup, full tests and then owner `RESULT_SUBMITTED`.
+Required exact-head evidence remains: clean lockfile install, `npm audit`, `node -e 'require("sqlite3")'`, isolated startup, full tests and then owner `RESULT_SUBMITTED`.
+
+Known residual risk to include in `RESULT_SUBMITTED`: upstream `node-sqlite3` and its `prebuild-install` mechanism are currently deprecated/unmaintained, so any longer-term database-library migration belongs in separate follow-up scope rather than this P1 compatibility repair.
