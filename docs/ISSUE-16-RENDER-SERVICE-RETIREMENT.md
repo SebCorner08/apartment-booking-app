@@ -1,7 +1,7 @@
 # Issue #16 — Render duplicate-service retirement gate
 
 Owner/coordinator: AGT-LEAD-001
-Repository baseline synchronized: `a7fe73ab7ebe1df2ba3376ae4bb0804f117b493e`
+Repository baseline synchronized: `8ce680d8e6e3b61a9a714c144600e2425d397054`
 
 ## Authoritative service
 
@@ -55,3 +55,15 @@ Current Render inventory:
 - `srv-daj05vgae00c7385b8p0` / `apartment-booking-app`: suspended by user, auto-deploy still enabled.
 
 Only the authoritative service is active. The remaining cleanup is exactly the two unchecked retirement items: disable auto-deploy and retire/delete the two suspended non-authoritative services. The connected Render actions still do not expose those service mutations.
+
+
+## Post-merge inventory — 2026-09-18
+
+Fresh Render readback after #8/#15 integration is unchanged for service retirement:
+- authoritative `srv-daj8qnu7bikc73b4q070`: active, `main`, auto-deploy enabled, corrected source-rebuild command active;
+- duplicate `srv-dajh43gae00c739v1vr0`: still user-suspended, auto-deploy still enabled;
+- legacy `srv-daj05vgae00c7385b8p0`: still user-suspended, auto-deploy still enabled.
+
+The connected Render capability still exposes no service-delete/suspend/update-auto-deploy mutation. Repository changes cannot safely substitute for those two external retirement actions.
+
+This PR therefore tracks the verified cleanup plan and inventory only. It must not auto-close Issue #16 until the two suspended services are actually retired and a final inventory confirms they are gone.
