@@ -5,12 +5,9 @@ const {
   resolveDatabasePath,
   ensureDatabaseDirectory,
 } = require("./database-path");
+const { DEFAULT_PRICING } = require("./pricing-settings");
 
 const dbPath = ensureDatabaseDirectory(resolveDatabasePath());
-const defaultMecklenburgSales =
-  parseFloat(process.env.TAX_MECKLENBURG_SALES) || 8.25;
-const defaultMecklenburgOccupancy =
-  parseFloat(process.env.TAX_MECKLENBURG_OCCUPANCY) || 8.0;
 
 let openError = null;
 let bootstrapError = null;
@@ -111,7 +108,9 @@ db.run(
     mecklenburg_sales REAL DEFAULT 8.25,
     mecklenburg_occupancy REAL DEFAULT 8.00,
     monthly_rate REAL DEFAULT 1800,
-    nightly_rate REAL DEFAULT 150
+    nightly_rate REAL DEFAULT 150,
+    cleaning_fee REAL DEFAULT 0,
+    minimum_nights INTEGER DEFAULT 10
 )`,
   requiredStep("Error al crear la tabla tax_settings"),
 );
@@ -145,6 +144,26 @@ db.run(
   compatibilityColumn("tax_settings", "nightly_rate"),
 );
 
+db.run(
+  `ALTER TABLE tax_settings ADD COLUMN cleaning_fee REAL`,
+  compatibilityColumn("tax_settings", "cleaning_fee"),
+);
+db.run(
+  `UPDATE tax_settings SET cleaning_fee = ? WHERE cleaning_fee IS NULL`,
+  [DEFAULT_PRICING.cleaning_fee],
+  requiredStep("Error al migrar tax_settings.cleaning_fee"),
+);
+
+db.run(
+  `ALTER TABLE tax_settings ADD COLUMN minimum_nights INTEGER`,
+  compatibilityColumn("tax_settings", "minimum_nights"),
+);
+db.run(
+  `UPDATE tax_settings SET minimum_nights = ? WHERE minimum_nights IS NULL`,
+  [DEFAULT_PRICING.minimum_nights],
+  requiredStep("Error al migrar tax_settings.minimum_nights"),
+);
+
 // Migración: número de huéspedes por reserva
 db.run(
   `ALTER TABLE bookings ADD COLUMN guests INTEGER DEFAULT 2`,
@@ -166,11 +185,20 @@ db.run(
     mecklenburg_sales,
     mecklenburg_occupancy,
     monthly_rate,
-    nightly_rate
+    nightly_rate,
+    cleaning_fee,
+    minimum_nights
   )
-  SELECT 0, 0, 0, datetime('now'), ?, ?, 1800, 150
+  SELECT 0, 0, 0, datetime('now'), ?, ?, ?, ?, ?, ?
   WHERE NOT EXISTS (SELECT 1 FROM tax_settings)`,
-  [defaultMecklenburgSales, defaultMecklenburgOccupancy],
+  [
+    DEFAULT_PRICING.mecklenburg_sales,
+    DEFAULT_PRICING.mecklenburg_occupancy,
+    DEFAULT_PRICING.monthly_rate,
+    DEFAULT_PRICING.nightly_rate,
+    DEFAULT_PRICING.cleaning_fee,
+    DEFAULT_PRICING.minimum_nights,
+  ],
   requiredStep("Error al inicializar tax_settings"),
 );
 
@@ -220,5 +248,8 @@ db.get("SELECT 1 AS ready", (probeError) => {
 
 // Expose the resolved path for diagnostics/tests without changing DB semantics.
 db.databasePath = dbPath;
+// Backwards-compatible alias for pricing callers. Both promises settle from the
+// same complete bootstrap/migration probe so pricing cannot become ready early.
+db.pricingReady = db.ready;
 
 module.exports = db;

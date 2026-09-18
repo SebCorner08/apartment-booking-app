@@ -39,6 +39,13 @@ async function req(method, p, body, headers = {}) {
   return r;
 }
 
+function dateDaysFromToday(days) {
+  const date = new Date();
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().split("T")[0];
+}
+
 function openWebSocket(pathname, protocols, origin) {
   return new Promise((resolve, reject) => {
     const websocketUrl = `${API_URL.replace(/^http/, "ws")}${pathname}`;
@@ -421,15 +428,54 @@ function openWebSocket(pathname, protocols, origin) {
     `status=${r.status}`,
   );
 
+  const boundaryCheckIn = dateDaysFromToday(30);
+  const maximumCheckOut = dateDaysFromToday(30 + 365);
+  const overMaximumCheckOut = dateDaysFromToday(30 + 366);
+
+  r = await req("POST", "/api/calculate-price", {
+    checkIn: boundaryCheckIn,
+    checkOut: maximumCheckOut,
+  });
+  let responseBody = await r.json();
+  check(
+    "cotización de 365 noches → 200",
+    r.status === 200 && responseBody.nights === 365,
+    `status=${r.status} ${JSON.stringify(responseBody)}`,
+  );
+
+  r = await req("POST", "/api/calculate-price", {
+    checkIn: boundaryCheckIn,
+    checkOut: overMaximumCheckOut,
+  });
+  responseBody = await r.json();
+  check(
+    "cotización de 366 noches → 400 con límite compartido",
+    r.status === 400 && responseBody.error === "Maximum stay is 365 nights",
+    `status=${r.status} ${JSON.stringify(responseBody)}`,
+  );
+
   r = await req("POST", "/api/create-checkout-session", {
-    checkIn: "2036-01-05",
-    checkOut: "2039-01-05", // ~3 años de estancia
+    checkIn: boundaryCheckIn,
+    checkOut: overMaximumCheckOut,
     guests: 2,
   });
+  responseBody = await r.json();
   check(
-    "estancia de más de 365 noches → 400",
-    r.status === 400,
-    `status=${r.status}`,
+    "checkout de 366 noches → 400 con límite compartido",
+    r.status === 400 && responseBody.error === "Maximum stay is 365 nights",
+    `status=${r.status} ${JSON.stringify(responseBody)}`,
+  );
+
+  r = await req("POST", "/api/create-checkout-session", {
+    checkIn: boundaryCheckIn,
+    checkOut: maximumCheckOut,
+    guests: 2,
+  });
+  responseBody = await r.json();
+  check(
+    "checkout de 365 noches → 200",
+    r.status === 200 && responseBody.pricing?.nights === 365,
+    `status=${r.status} ${JSON.stringify(responseBody)}`,
   );
 
   r = await req("POST", "/api/create-checkout-session", {

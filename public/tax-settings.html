@@ -487,6 +487,25 @@
               </div>
             </div>
 
+            <!-- Minimum Stay -->
+            <div class="form-group">
+              <label>Minimum Stay (nights)</label>
+              <div class="description">
+                Server-authoritative minimum for direct short-stay bookings.
+              </div>
+              <div class="input-group">
+                <input
+                  type="number"
+                  id="minimumNights"
+                  step="1"
+                  min="1"
+                  placeholder="Load from server"
+                  required
+                />
+                <span class="percent-sign">nights</span>
+              </div>
+            </div>
+
             <!-- ========== SHORT STAY PREVIEW ========== -->
             <div class="preview-section">
               <div class="preview-title">
@@ -619,13 +638,20 @@
       const salesInput = document.getElementById("mecklenburgSales");
       const occupancyInput = document.getElementById("mecklenburgOccupancy");
       const monthlyRateInput = document.getElementById("monthlyRate");
+      const minimumNightsInput = document.getElementById("minimumNights");
       const resetBtn = document.getElementById("resetBtn");
+      const saveButton = form.querySelector('button[type="submit"]');
 
       const DEFAULT_RATES = {
         mecklenburg_sales: 8.25,
         mecklenburg_occupancy: 8.0,
         monthly_rate: 1800,
       };
+      let authoritativeMinimumNights = null;
+
+      function setSaveAvailability() {
+        saveButton.disabled = authoritativeMinimumNights == null;
+      }
 
       function formatCurrency(amount) {
         return (
@@ -727,11 +753,24 @@
               ? data.monthly_rate
               : DEFAULT_RATES.monthly_rate;
 
+          const minimumNights = Number(data.minimum_nights);
+          if (!Number.isInteger(minimumNights) || minimumNights < 1) {
+            throw new Error("Invalid minimum stay returned by server");
+          }
+          authoritativeMinimumNights = minimumNights;
+          minimumNightsInput.value = authoritativeMinimumNights;
+          setSaveAvailability();
+
           updateTaxPreview();
           loading.style.display = "none";
         } catch (error) {
           console.error("Error loading settings:", error);
-          showMessage("Error loading settings. Using defaults.", "error");
+          showMessage(
+            authoritativeMinimumNights == null
+              ? "Error loading settings. Saving is disabled until server settings load successfully."
+              : "Error refreshing settings. Preserving the last server minimum stay.",
+            "error",
+          );
           setDefaultValues();
           loading.style.display = "none";
         }
@@ -741,6 +780,8 @@
         salesInput.value = DEFAULT_RATES.mecklenburg_sales;
         occupancyInput.value = DEFAULT_RATES.mecklenburg_occupancy;
         monthlyRateInput.value = DEFAULT_RATES.monthly_rate;
+        minimumNightsInput.value = authoritativeMinimumNights ?? "";
+        setSaveAvailability();
         updateTaxPreview();
       }
 
@@ -748,6 +789,16 @@
         e.preventDefault();
 
         try {
+
+          if (authoritativeMinimumNights == null) {
+            throw new Error(
+              "Cannot save settings until server pricing settings load successfully",
+            );
+
+          const minimumNights = Number(minimumNightsInput.value);
+          if (!Number.isInteger(minimumNights) || minimumNights < 1) {
+            throw new Error("Minimum stay must be a positive integer");
+
           const response = await fetch(`${API_URL}/api/admin/tax-settings`, {
             method: "POST",
             credentials: "include",
@@ -758,6 +809,7 @@
               mecklenburg_sales: parseFloat(salesInput.value),
               mecklenburg_occupancy: parseFloat(occupancyInput.value),
               monthly_rate: parseFloat(monthlyRateInput.value),
+              minimum_nights: minimumNights,
             }),
           });
 
@@ -771,6 +823,8 @@
             throw new Error(error.error || "Failed to save settings");
           }
 
+          authoritativeMinimumNights = minimumNights;
+          setSaveAvailability();
           showMessage("✅ Tax settings saved successfully!", "success");
           updateTaxPreview();
         } catch (error) {
@@ -790,6 +844,7 @@
       occupancyInput.addEventListener("input", updateTaxPreview);
       monthlyRateInput.addEventListener("input", updateTaxPreview);
 
+      setSaveAvailability();
       loadSettings();
     </script>
   </body>
