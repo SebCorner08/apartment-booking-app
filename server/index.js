@@ -27,6 +27,13 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const DOMAIN = process.env.DOMAIN;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const AIRBNB_ICAL_URL = process.env.AIRBNB_ICAL_URL;
+const ADMIN_SESSION_MINUTES = 60;
+const ADMIN_COOKIE_NAME = "admin_session";
+const ADMIN_WS_PATH = "/admin-updates";
+const ADMIN_WS_PROTOCOL = "admin-updates";
+const ADMIN_WS_TICKET_PREFIX = "admin-ticket.";
+const ADMIN_WS_TICKET_TTL_MS = 15 * 1000;
+const adminWebSocketTickets = new Map();
 
 // Reglas tarifarias activas (los importes monetarios reales se leen de la DB)
 const MIN_NIGHTS = 10;
@@ -40,9 +47,6 @@ const HOLD_MINUTES = 35; // un poco más que la expiración de la sesión de Str
 const MOCK_PAYMENTS =
   NODE_ENV !== "production" && process.env.MOCK_PAYMENTS === "true";
 const mockSessions = new Map(); // sesiones falsas en memoria, solo para MOCK_PAYMENTS
-
-// Servir archivos estáticos desde public/
-app.use(express.static(path.join(__dirname, "..", "public")));
 
 // No arrancar sin secretos configurados: evita contraseñas/JWT por defecto inseguros
 if (!ADMIN_PASSWORD || !JWT_SECRET) {
@@ -59,10 +63,48 @@ if (MOCK_PAYMENTS) {
 }
 
 app.set("trust proxy", 1);
-// El sitio usa scripts inline y varios CDNs (Font Awesome, Google Fonts, Swiper),
-// así que se desactiva la CSP por defecto de helmet para no romper la página;
-// las demás cabeceras de seguridad (X-Frame-Options, etc.) se mantienen.
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'self'"],
+        imgSrc: ["'self'", "data:", "https:"],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://cdnjs.cloudflare.com",
+          "https://cdn.jsdelivr.net",
+          "https://unpkg.com",
+          "https://fonts.googleapis.com",
+        ],
+        fontSrc: [
+          "'self'",
+          "data:",
+          "https://cdnjs.cloudflare.com",
+          "https://fonts.gstatic.com",
+        ],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://cdnjs.cloudflare.com",
+          "https://cdn.jsdelivr.net",
+          "https://unpkg.com",
+          "https://elfsightcdn.com",
+        ],
+        frameSrc: ["'self'", "https://*.elfsight.com"],
+        connectSrc: [
+          "'self'",
+          "https://escapelakenorman-api-l2da.onrender.com",
+          "wss://escapelakenorman-api-l2da.onrender.com",
+          "https://*.elfsight.com",
+        ],
+      },
+    },
+  }),
+);
 
 // Restringe qué orígenes pueden llamar a la API (evita que otros sitios usen tokens robados)
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || DOMAIN || "")
@@ -70,9 +112,21 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || DOMAIN || "")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+function isAllowedOrigin(origin) {
+  if (!origin) return NODE_ENV !== "production";
+  if (allowedOrigins.includes(origin)) return true;
+  return (
+    NODE_ENV !== "production" &&
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+  );
+}
+
 app.use(
   cors({
-    origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+    origin(origin, callback) {
+      callback(null, isAllowedOrigin(origin));
+    },
+    credentials: true,
   }),
 );
 
@@ -119,9 +173,43 @@ const checkoutLimiter = rateLimit({
 });
 
 // ============ AUTENTICACIÓN ============
+function readCookie(req, name) {
+  const cookieHeader = req.headers.cookie || "";
+  for (const pair of cookieHeader.split(";")) {
+    const separator = pair.indexOf("=");
+    if (separator === -1) continue;
+    const key = pair.slice(0, separator).trim();
+    if (key === name) {
+      try {
+        return decodeURIComponent(pair.slice(separator + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function adminCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: NODE_ENV === "production",
+    sameSite: NODE_ENV === "production" ? "none" : "lax",
+    maxAge: ADMIN_SESSION_MINUTES * 60 * 1000,
+    path: "/",
+  };
+}
+
 const checkAdminAuth = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
+  const origin = req.headers.origin;
+  if (
+    !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
+    !isAllowedOrigin(origin)
+  ) {
+    return res.sendStatus(403);
+  }
+
+  const token = readCookie(req, ADMIN_COOKIE_NAME);
 
   if (!token) return res.sendStatus(401);
 
@@ -131,6 +219,57 @@ const checkAdminAuth = (req, res, next) => {
     next();
   });
 };
+
+function purgeExpiredAdminWebSocketTickets(now = Date.now()) {
+  for (const [ticket, record] of adminWebSocketTickets) {
+    if (record.expiresAt <= now || record.sessionExpiresAt <= now) {
+      adminWebSocketTickets.delete(ticket);
+    }
+  }
+}
+
+function issueAdminWebSocketTicket(origin, user) {
+  const now = Date.now();
+  purgeExpiredAdminWebSocketTickets(now);
+
+  const sessionExpiresAt = Number(user && user.exp) * 1000;
+  if (!Number.isFinite(sessionExpiresAt) || sessionExpiresAt <= now) {
+    return null;
+  }
+
+  const ticket = crypto.randomBytes(32).toString("base64url");
+  adminWebSocketTickets.set(ticket, {
+    origin: origin || null,
+    expiresAt: now + ADMIN_WS_TICKET_TTL_MS,
+    sessionExpiresAt,
+  });
+  return ticket;
+}
+
+function consumeAdminWebSocketTicket(ticket, origin) {
+  const now = Date.now();
+  purgeExpiredAdminWebSocketTickets(now);
+  const record = adminWebSocketTickets.get(ticket);
+
+  if (!record || record.origin !== (origin || null)) return null;
+
+  adminWebSocketTickets.delete(ticket);
+  return record;
+}
+
+function parseWebSocketProtocols(request) {
+  return String(request.headers["sec-websocket-protocol"] || "")
+    .split(",")
+    .map((protocol) => protocol.trim())
+    .filter(Boolean);
+}
+
+function rejectWebSocketUpgrade(socket, statusCode, statusText) {
+  socket.write(
+    `HTTP/1.1 ${statusCode} ${statusText}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+  );
+  socket.destroy();
+}
 
 // ============ FUNCIONES AUXILIARES ============
 
@@ -791,11 +930,36 @@ app.post("/api/admin/login", loginLimiter, (req, res) => {
 
   if (password === ADMIN_PASSWORD) {
     const user = { name: "admin", role: "admin" };
-    const token = jwt.sign(user, JWT_SECRET, { expiresIn: "24h" });
-    res.json({ token, user });
+    const token = jwt.sign(user, JWT_SECRET, {
+      expiresIn: `${ADMIN_SESSION_MINUTES}m`,
+    });
+    res.cookie(ADMIN_COOKIE_NAME, token, adminCookieOptions());
+    res.json({
+      user,
+      session_expires_in_minutes: ADMIN_SESSION_MINUTES,
+    });
   } else {
     res.status(401).json({ error: "Invalid password" });
   }
+});
+
+app.post("/api/admin/logout", (req, res) => {
+  if (!isAllowedOrigin(req.headers.origin)) return res.sendStatus(403);
+  const options = adminCookieOptions();
+  delete options.maxAge;
+  res.clearCookie(ADMIN_COOKIE_NAME, options);
+  res.sendStatus(204);
+});
+
+app.post("/api/admin/websocket-ticket", checkAdminAuth, (req, res) => {
+  const ticket = issueAdminWebSocketTicket(req.headers.origin, req.user);
+  if (!ticket) return res.sendStatus(401);
+
+  res.set("Cache-Control", "no-store");
+  res.json({
+    ticket,
+    expires_in_seconds: ADMIN_WS_TICKET_TTL_MS / 1000,
+  });
 });
 
 // Obtener todas las reservas (requiere autenticación)
@@ -1222,13 +1386,71 @@ async function syncAirbnbCalendar() {
 // ============ SERVER ============
 const server = http.createServer(app);
 
-// WebSocket para notificar al panel admin en tiempo real (nuevas reservas, cancelaciones, sync)
-const wss = new WebSocket.Server({ server });
+// WebSocket autenticado para notificar al panel admin en tiempo real.
+// El navegador obtiene primero un ticket efímero mediante la cookie HttpOnly.
+const wss = new WebSocket.Server({
+  noServer: true,
+  handleProtocols(protocols) {
+    return protocols.has(ADMIN_WS_PROTOCOL) ? ADMIN_WS_PROTOCOL : false;
+  },
+});
+
+server.on("upgrade", (request, socket, head) => {
+  let requestUrl;
+  try {
+    requestUrl = new URL(
+      request.url,
+      `http://${request.headers.host || "localhost"}`,
+    );
+  } catch {
+    return rejectWebSocketUpgrade(socket, 400, "Bad Request");
+  }
+
+  if (requestUrl.pathname !== ADMIN_WS_PATH) {
+    return rejectWebSocketUpgrade(socket, 404, "Not Found");
+  }
+
+  const origin = request.headers.origin;
+  if (!isAllowedOrigin(origin)) {
+    return rejectWebSocketUpgrade(socket, 403, "Forbidden");
+  }
+
+  const protocols = parseWebSocketProtocols(request);
+  const ticketProtocol = protocols.find((protocol) =>
+    protocol.startsWith(ADMIN_WS_TICKET_PREFIX),
+  );
+  if (!protocols.includes(ADMIN_WS_PROTOCOL) || !ticketProtocol) {
+    return rejectWebSocketUpgrade(socket, 401, "Unauthorized");
+  }
+
+  const ticket = ticketProtocol.slice(ADMIN_WS_TICKET_PREFIX.length);
+  const ticketRecord = consumeAdminWebSocketTicket(ticket, origin);
+  if (!ticketRecord) {
+    return rejectWebSocketUpgrade(socket, 401, "Unauthorized");
+  }
+
+  wss.handleUpgrade(request, socket, head, (client) => {
+    client.isAdminAuthenticated = true;
+    client.adminSessionExpiresAt = ticketRecord.sessionExpiresAt;
+
+    const sessionTimer = setTimeout(
+      () => client.close(4001, "Admin session expired"),
+      Math.max(0, ticketRecord.sessionExpiresAt - Date.now()),
+    );
+    client.once("close", () => clearTimeout(sessionTimer));
+
+    wss.emit("connection", client, request);
+  });
+});
 
 function broadcastAdminUpdate() {
   const payload = JSON.stringify({ type: "bookings_updated" });
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
+    if (
+      client.isAdminAuthenticated &&
+      client.adminSessionExpiresAt > Date.now() &&
+      client.readyState === WebSocket.OPEN
+    ) {
       client.send(payload);
     }
   });

@@ -608,12 +608,11 @@
     </div>
 
     <script>
-      const PROD_API_URL = "https://escapelakenorman-api-l2da.onrender.com";
       const API_URL = ["localhost", "127.0.0.1"].includes(
         window.location.hostname,
       )
         ? `http://${window.location.hostname}:3001`
-        : PROD_API_URL;
+        : "";
       const form = document.getElementById("taxForm");
       const message = document.getElementById("message");
       const loading = document.getElementById("loading");
@@ -703,19 +702,12 @@
         try {
           loading.style.display = "block";
 
-          const token = localStorage.getItem("admin_token");
-          if (!token) {
-            window.location.href = "admin.html";
-            return;
-          }
-
           const response = await fetch(`${API_URL}/api/admin/tax-settings`, {
-            headers: { Authorization: `Bearer ${token}` },
+            credentials: "include",
           });
 
           if (response.status === 403 || response.status === 401) {
-            localStorage.removeItem("admin_token");
-            window.location.href = "admin.html";
+            window.location.href = "login.html";
             return;
           }
 
@@ -756,17 +748,11 @@
         e.preventDefault();
 
         try {
-          const token = localStorage.getItem("admin_token");
-          if (!token) {
-            window.location.href = "admin.html";
-            return;
-          }
-
           const response = await fetch(`${API_URL}/api/admin/tax-settings`, {
             method: "POST",
+            credentials: "include",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Bearer ${token}`,
             },
             body: JSON.stringify({
               mecklenburg_sales: parseFloat(salesInput.value),
@@ -776,8 +762,7 @@
           });
 
           if (response.status === 403 || response.status === 401) {
-            localStorage.removeItem("admin_token");
-            window.location.href = "admin.html";
+            window.location.href = "login.html";
             return;
           }
 

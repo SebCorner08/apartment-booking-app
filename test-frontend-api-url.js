@@ -14,6 +14,12 @@ const files = [
   "public/tax-settings.html",
 ];
 
+const firstPartyAdminFiles = new Set([
+  "public/login.html",
+  "public/admin.html",
+  "public/tax-settings.html",
+]);
+
 let failed = 0;
 
 for (const rel of files) {
@@ -29,18 +35,22 @@ for (const rel of files) {
   const renderUrls = [
     ...content.matchAll(/https:\/\/[a-z0-9-]+\.onrender\.com/g),
   ].map((m) => m[0]);
-  const hasExpected = currentProdUrl === EXPECTED_PROD;
+  const usesFirstPartyAdminApi = firstPartyAdminFiles.has(rel);
+  const hasExpected = usesFirstPartyAdminApi
+    ? currentProdUrl === null
+    : currentProdUrl === EXPECTED_PROD;
   const hasUnexpectedRenderUrl = renderUrls.some(
     (url) => url !== EXPECTED_PROD,
   );
   let keepsLocalhost = false;
 
-  if (apiExpr && currentProdUrl) {
+  if (apiExpr && (usesFirstPartyAdminApi || currentProdUrl)) {
     const resolveApiUrl = (hostname) =>
       vm.runInNewContext(
         `(() => {
-          const PROD_API_URL = ${JSON.stringify(currentProdUrl)};
+          ${currentProdUrl ? `const PROD_API_URL = ${JSON.stringify(currentProdUrl)};` : ""}
           const window = { location: { hostname: ${JSON.stringify(hostname)} } };
+          const IS_LOCAL = ["localhost", "127.0.0.1"].includes(window.location.hostname);
           return (${apiExpr});
         })()`,
       );
@@ -48,14 +58,20 @@ for (const rel of files) {
     keepsLocalhost =
       resolveApiUrl("localhost") === "http://localhost:3001" &&
       resolveApiUrl("127.0.0.1") === "http://127.0.0.1:3001" &&
-      resolveApiUrl("example.com") === EXPECTED_PROD;
+      resolveApiUrl("example.com") ===
+        (usesFirstPartyAdminApi ? "" : EXPECTED_PROD);
   }
 
   if (!hasExpected || hasUnexpectedRenderUrl || !keepsLocalhost) {
     failed += 1;
     console.log(`❌ ${rel}`);
-    if (!hasExpected)
-      console.log(`   - Missing expected URL: ${EXPECTED_PROD}`);
+    if (!hasExpected) {
+      console.log(
+        usesFirstPartyAdminApi
+          ? "   - Admin HTTP must use the first-party production origin"
+          : `   - Missing expected URL: ${EXPECTED_PROD}`,
+      );
+    }
     if (hasUnexpectedRenderUrl)
       console.log(
         `   - Unexpected Render URL(s): ${renderUrls.filter((url) => url !== EXPECTED_PROD).join(", ")}`,

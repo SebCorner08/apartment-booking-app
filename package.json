@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node server/index.js",
+    "test:admin-session": "node test-admin-session-browser.js",
     "test": "node test-repository-data-hygiene.js && node test-database-path.js && node test-stripe-webhook-durability.js && node test-runner.js",
     "test:persistence": "node test-database-path.js",
     "test:booking": "node test-booking-flow.js",
