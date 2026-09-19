@@ -170,13 +170,31 @@ async function persistManualChargeSession(db, chargeId, sessionId) {
     `UPDATE manual_charges
      SET stripe_session_id = ?
      WHERE id = ?
-       AND (stripe_session_id IS NULL OR stripe_session_id = ?)`,
-    [sessionId, chargeId, sessionId],
+       AND status = 'pending'
+       AND stripe_session_id IS NULL`,
+    [sessionId, chargeId],
   );
 
-  if (result.changes !== 1) {
-    throw new Error("Manual charge session linkage was not written");
+  if (result.changes === 1) return true;
+
+  const existing = await getDb(
+    db,
+    `SELECT status, stripe_session_id FROM manual_charges WHERE id = ?`,
+    [chargeId],
+  );
+  if (
+    existing &&
+    existing.stripe_session_id === sessionId &&
+    (existing.status === "pending" || existing.status === "paid")
+  ) {
+    return false;
   }
+
+  const error = new Error(
+    "Manual charge state changed before its Stripe session could be linked",
+  );
+  error.requiresManualReconciliation = true;
+  throw error;
 }
 
 function manualChargeRecoveryBody(error, chargeId) {
@@ -479,7 +497,7 @@ function registerAdminRoutes(app, {
         });
         sessionId = session.id;
         sessionUrl = session.url;
-      } else if (isPaidRetry || recoveryChargeId != null) {
+      } else if (sessionId != null || recoveryChargeId != null) {
         return res.status(503).json(
           manualChargeRecoveryBody(
             "Payment provider is unavailable; retry this existing charge when configuration is restored",
@@ -502,11 +520,21 @@ function registerAdminRoutes(app, {
       );
     }
 
+    let shouldBroadcast = !isPaidRetry;
     if (sessionId && !isPaidRetry) {
       try {
-        await persistManualChargeSession(db, chargeId, sessionId);
+        shouldBroadcast = await persistManualChargeSession(
+          db,
+          chargeId,
+          sessionId,
+        );
       } catch (dbErr) {
         console.error("Manual charge session persistence failed:", dbErr);
+        if (dbErr.requiresManualReconciliation) {
+          return res.status(409).json(
+            manualChargeReconciliationBody(dbErr.message, chargeId),
+          );
+        }
         return res.status(503).json(
           manualChargeRecoveryBody(
             "Payment session created but its manual-charge linkage was not saved; retry this existing charge",
@@ -516,7 +544,7 @@ function registerAdminRoutes(app, {
       }
     }
 
-    if (!isPaidRetry) broadcastAdminUpdate();
+    if (shouldBroadcast) broadcastAdminUpdate();
     return res.status(201).json({
       message: "Charge created",
       id: chargeId,
@@ -538,11 +566,26 @@ function registerAdminRoutes(app, {
   });
 
   app.post("/api/admin/charges/:id/pay", checkAdminAuth, (req, res) => {
+    const unclaimedSessionCondition = mockPayments
+      ? "(stripe_session_id IS NULL OR stripe_session_id = 'mock_charge_' || id)"
+      : "stripe_session_id IS NULL";
     db.run(
-      `UPDATE manual_charges SET status = 'paid', paid_at = datetime('now') WHERE id = ?`,
+      `UPDATE manual_charges
+       SET status = 'paid', paid_at = datetime('now')
+       WHERE id = ?
+         AND status = 'pending'
+         AND ${unclaimedSessionCondition}`,
       [req.params.id],
       function (err) {
         if (err) return res.status(500).json({ error: err.message });
+        if (this.changes !== 1) {
+          return res.status(409).json(
+            manualChargeReconciliationBody(
+              "Only a pending manual charge without a live Stripe session can be marked paid manually",
+              req.params.id,
+            ),
+          );
+        }
         broadcastAdminUpdate();
         res.json({ message: "Charge marked as paid", changes: this.changes });
       },

@@ -134,7 +134,34 @@ function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}
         return;
       }
 
-      if (sql.includes("UPDATE manual_charges")) {
+      if (
+        sql.includes("UPDATE manual_charges") &&
+        sql.includes("SET status = 'paid'")
+      ) {
+        updateCount += 1;
+        const chargeId = Number(params[0]);
+        const row = rows.get(chargeId);
+        const hasAllowedMockSession =
+          sql.includes("'mock_charge_' || id") &&
+          row?.stripe_session_id === `mock_charge_${chargeId}`;
+        if (
+          !row ||
+          row.status !== "pending" ||
+          (row.stripe_session_id != null && !hasAllowedMockSession)
+        ) {
+          callback.call({ changes: 0 }, null);
+          return;
+        }
+        row.status = "paid";
+        row.paid_at = new Date().toISOString();
+        callback.call({ changes: 1 }, null);
+        return;
+      }
+
+      if (
+        sql.includes("UPDATE manual_charges") &&
+        sql.includes("SET stripe_session_id = ?")
+      ) {
         updateCount += 1;
         const [sessionId, chargeId] = params;
         const complete = () => {
@@ -144,7 +171,11 @@ function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}
             return;
           }
           const row = rows.get(chargeId);
-          if (!row || (row.stripe_session_id && row.stripe_session_id !== sessionId)) {
+          if (
+            !row ||
+            row.status !== "pending" ||
+            row.stripe_session_id != null
+          ) {
             callback.call({ changes: 0 }, null);
             return;
           }
@@ -280,7 +311,7 @@ function seedProtocolCharge(db, overrides = {}) {
   });
 }
 
-function registerManualChargeRoute({ db, mockPayments, stripe, broadcast }) {
+function registerManualChargeRoutes({ db, mockPayments, stripe, broadcast }) {
   const { app, routes } = createFakeApp();
   registerAdminRoutes(app, {
     loginLimiter: (_req, _res, next) => next(),
@@ -298,9 +329,15 @@ function registerManualChargeRoute({ db, mockPayments, stripe, broadcast }) {
     domain: "https://example.test",
     stripe,
   });
-  const handlers = routes.get("POST /api/admin/charges");
-  assert(handlers, "manual-charge route must be registered");
-  return handlers;
+  const create = routes.get("POST /api/admin/charges");
+  const markPaid = routes.get("POST /api/admin/charges/:id/pay");
+  assert(create, "manual-charge route must be registered");
+  assert(markPaid, "manual-charge mark-paid route must be registered");
+  return { create, markPaid };
+}
+
+function registerManualChargeRoute(options) {
+  return registerManualChargeRoutes(options).create;
 }
 
 async function waitFor(condition) {
@@ -451,6 +488,185 @@ async function testStripeFailureUsesIdempotentRecovery() {
   );
   assert.strictEqual(db.rows.get(42).stripe_session_id, "cs_test_42");
   assert.strictEqual(broadcasts, 1);
+}
+
+async function testManualPayAndSessionLinkageAreSerialized() {
+  const manualPayFirstDb = createManualChargeDb({ delayedUpdates: true });
+  const manualPayFirstStripe = createFakeStripe();
+  let manualPayFirstBroadcasts = 0;
+  const manualPayFirstRoutes = registerManualChargeRoutes({
+    db: manualPayFirstDb,
+    mockPayments: false,
+    stripe: manualPayFirstStripe,
+    broadcast: () => {
+      manualPayFirstBroadcasts += 1;
+    },
+  });
+  const createAfterManualPay = createFakeResponse();
+  const createAfterManualPayRequest = dispatch(
+    manualPayFirstRoutes.create,
+    { body: { ...CHARGE } },
+    createAfterManualPay,
+  );
+  await waitFor(() => manualPayFirstDb.pendingUpdates.length === 1);
+
+  const manualPay = createFakeResponse();
+  await dispatch(
+    manualPayFirstRoutes.markPaid,
+    { params: { id: 42 } },
+    manualPay,
+  );
+  assert.strictEqual(manualPay.statusCode, 200);
+  assert.deepStrictEqual(manualPay.body, {
+    message: "Charge marked as paid",
+    changes: 1,
+  });
+  manualPayFirstDb.completeNextUpdate();
+  await createAfterManualPayRequest;
+
+  assert.strictEqual(createAfterManualPay.statusCode, 409);
+  assert.strictEqual(
+    createAfterManualPay.body.code,
+    "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+  );
+  assert.strictEqual(createAfterManualPay.body.url, undefined);
+  assert.strictEqual(createAfterManualPay.body.stripe_session_id, undefined);
+  assert.strictEqual(manualPayFirstDb.rows.get(42).status, "paid");
+  assert.strictEqual(manualPayFirstDb.rows.get(42).stripe_session_id, null);
+  assert.strictEqual(manualPayFirstStripe.createCalls.length, 1);
+  assert.strictEqual(manualPayFirstBroadcasts, 1);
+
+  const linkageFirstDb = createManualChargeDb({ delayedUpdates: true });
+  const linkageFirstStripe = createFakeStripe();
+  let linkageFirstBroadcasts = 0;
+  const linkageFirstRoutes = registerManualChargeRoutes({
+    db: linkageFirstDb,
+    mockPayments: false,
+    stripe: linkageFirstStripe,
+    broadcast: () => {
+      linkageFirstBroadcasts += 1;
+    },
+  });
+  const createBeforeManualPay = createFakeResponse();
+  const createBeforeManualPayRequest = dispatch(
+    linkageFirstRoutes.create,
+    { body: { ...CHARGE } },
+    createBeforeManualPay,
+  );
+  await waitFor(() => linkageFirstDb.pendingUpdates.length === 1);
+  linkageFirstDb.completeNextUpdate();
+  await createBeforeManualPayRequest;
+  assert.strictEqual(createBeforeManualPay.statusCode, 201);
+  assert.strictEqual(
+    createBeforeManualPay.body.stripe_session_id,
+    "cs_test_42",
+  );
+
+  const rejectedManualPay = createFakeResponse();
+  await dispatch(
+    linkageFirstRoutes.markPaid,
+    { params: { id: 42 } },
+    rejectedManualPay,
+  );
+  assert.strictEqual(rejectedManualPay.statusCode, 409);
+  assert.strictEqual(
+    rejectedManualPay.body.code,
+    "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+  );
+  assert.strictEqual(linkageFirstDb.rows.get(42).status, "pending");
+  assert.strictEqual(
+    linkageFirstDb.rows.get(42).stripe_session_id,
+    "cs_test_42",
+  );
+  assert.strictEqual(linkageFirstStripe.createCalls.length, 1);
+  assert.strictEqual(linkageFirstBroadcasts, 1);
+
+  const legitimateManualPayDb = createManualChargeDb();
+  seedProtocolCharge(legitimateManualPayDb);
+  let legitimateManualPayBroadcasts = 0;
+  const legitimateManualPayRoutes = registerManualChargeRoutes({
+    db: legitimateManualPayDb,
+    mockPayments: false,
+    stripe: null,
+    broadcast: () => {
+      legitimateManualPayBroadcasts += 1;
+    },
+  });
+  const legitimateManualPay = createFakeResponse();
+  await dispatch(
+    legitimateManualPayRoutes.markPaid,
+    { params: { id: 42 } },
+    legitimateManualPay,
+  );
+  assert.strictEqual(legitimateManualPay.statusCode, 200);
+  assert.strictEqual(legitimateManualPay.body.changes, 1);
+  assert.strictEqual(legitimateManualPayDb.rows.get(42).status, "paid");
+  assert.strictEqual(
+    legitimateManualPayDb.rows.get(42).stripe_session_id,
+    null,
+  );
+  assert.ok(legitimateManualPayDb.rows.get(42).paid_at);
+  assert.strictEqual(legitimateManualPayBroadcasts, 1);
+
+  const mockManualPayDb = createManualChargeDb();
+  seedProtocolCharge(mockManualPayDb, {
+    stripe_session_id: "mock_charge_42",
+  });
+  let mockManualPayBroadcasts = 0;
+  const mockManualPayRoutes = registerManualChargeRoutes({
+    db: mockManualPayDb,
+    mockPayments: true,
+    stripe: null,
+    broadcast: () => {
+      mockManualPayBroadcasts += 1;
+    },
+  });
+  const mockManualPay = createFakeResponse();
+  await dispatch(
+    mockManualPayRoutes.markPaid,
+    { params: { id: 42 } },
+    mockManualPay,
+  );
+  assert.strictEqual(mockManualPay.statusCode, 200);
+  assert.strictEqual(mockManualPay.body.changes, 1);
+  assert.strictEqual(mockManualPayDb.rows.get(42).status, "paid");
+  assert.strictEqual(
+    mockManualPayDb.rows.get(42).stripe_session_id,
+    "mock_charge_42",
+  );
+  assert.strictEqual(mockManualPayBroadcasts, 1);
+}
+
+async function testWebhookFirstLinkageStillConverges() {
+  const db = createManualChargeDb({ delayedUpdates: true });
+  const stripe = createFakeStripe();
+  let broadcasts = 0;
+  const handlers = registerManualChargeRoute({
+    db,
+    mockPayments: false,
+    stripe,
+    broadcast: () => {
+      broadcasts += 1;
+    },
+  });
+  const response = createFakeResponse();
+  const request = dispatch(handlers, { body: { ...CHARGE } }, response);
+  await waitFor(() => db.pendingUpdates.length === 1);
+
+  const row = db.rows.get(42);
+  row.status = "paid";
+  row.stripe_session_id = "cs_test_42";
+  row.paid_at = new Date().toISOString();
+  db.completeNextUpdate();
+  await request;
+
+  assert.strictEqual(response.statusCode, 201);
+  assert.strictEqual(response.body.request_id, REQUEST_ID);
+  assert.strictEqual(response.body.stripe_session_id, "cs_test_42");
+  assert.strictEqual(row.status, "paid");
+  assert.strictEqual(row.stripe_session_id, "cs_test_42");
+  assert.strictEqual(stripe.createCalls.length, 1);
+  assert.strictEqual(broadcasts, 0);
 }
 
 async function testPaidStripeRetryRecoversLinkedSession() {
@@ -656,6 +872,38 @@ async function testPaidMockAndNoProviderBehavior() {
   );
   assert.strictEqual(unavailableDb.updateCount, 0);
   assert.strictEqual(unavailableBroadcasts, 0);
+
+  const linkedPendingDb = createManualChargeDb();
+  seedProtocolCharge(linkedPendingDb, {
+    status: "pending",
+    stripe_session_id: "cs_linked_42",
+  });
+  let linkedPendingBroadcasts = 0;
+  const linkedPendingHandlers = registerManualChargeRoute({
+    db: linkedPendingDb,
+    mockPayments: false,
+    stripe: null,
+    broadcast: () => {
+      linkedPendingBroadcasts += 1;
+    },
+  });
+  const linkedPendingResponse = createFakeResponse();
+  await dispatch(
+    linkedPendingHandlers,
+    { body: { ...CHARGE } },
+    linkedPendingResponse,
+  );
+  assert.strictEqual(linkedPendingResponse.statusCode, 503);
+  assert.strictEqual(
+    linkedPendingResponse.body.code,
+    "MANUAL_CHARGE_RECOVERY_REQUIRED",
+  );
+  assert.deepStrictEqual(linkedPendingResponse.body.recovery, {
+    charge_id: 42,
+  });
+  assert.strictEqual(linkedPendingResponse.body.url, undefined);
+  assert.strictEqual(linkedPendingDb.updateCount, 0);
+  assert.strictEqual(linkedPendingBroadcasts, 0);
 
   const pendingDb = createManualChargeDb();
   let pendingBroadcasts = 0;
@@ -985,6 +1233,8 @@ async function main() {
     await testMockFailureRecoversExistingRow();
     await testStripeSuccessWaitsForPersistence();
     await testStripeFailureUsesIdempotentRecovery();
+    await testManualPayAndSessionLinkageAreSerialized();
+    await testWebhookFirstLinkageStillConverges();
     await testPaidStripeRetryRecoversLinkedSession();
     await testPaidStripeRetryFailsClosed();
     await testPaidMockAndNoProviderBehavior();
@@ -998,7 +1248,7 @@ async function main() {
   }
 
   console.log(
-    "PASS: manual-charge durability, paid retry recovery, atomic request claims, legacy reconciliation, pruning cutoff, and strict Stripe validation",
+    "PASS: manual-charge durability, paid retry recovery, manual-pay serialization, atomic request claims, legacy reconciliation, pruning cutoff, and strict Stripe validation",
   );
 }
 
