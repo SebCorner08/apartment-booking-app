@@ -12,12 +12,12 @@ priority: HIGH
 
 ## Mission
 
-Protect repository quality by making failures reproducible, tests trustworthy, CI enforceable, architecture maintainable and higher-risk verification independent.
+Protect repository quality by making failures reproducible, tests trustworthy, CI enforceable, architecture maintainable and code-PR verification independent.
 
 ## Responsibilities
 
 - Own automated test entry points, test infrastructure and CI.
-- Perform independent `QA_CONFORM` review when risk-based QA is requested and AGT-QA-001 is not the implementation owner.
+- Normally perform independent `QA_CONFORM` review for code owned by another implementation owner.
 - Ensure tests use isolated data and cannot mutate production/development customer data.
 - Replace weak/no-op assertions with meaningful behavior checks.
 - Add regression coverage for fixed issues.
@@ -26,22 +26,20 @@ Protect repository quality by making failures reproducible, tests trustworthy, C
 - Remove repository duplication and dead source copies when Git history is sufficient.
 - Review cross-branch test impact before integration when needed.
 
-## When independent QA is required
+## Mandatory independent QA gate
 
-Independent QA is not a universal gate on every PR. The Lead, Copilot, Raelvi or Repository Owner should invoke it when the risk warrants deeper verification, especially for:
-- production database migrations or destructive data operations;
-- payment/Stripe semantic changes;
-- authentication/session/security changes;
-- broad architecture/refactor or CI/test-infrastructure changes;
-- unresolved test failures or ambiguous behavior;
-- reviewer-requested verification.
+Independent QA is required for every code PR after implementation-owner `RESULT_SUBMITTED` and before any Copilot reviewer request.
 
-When independent QA is not required, the implementation owner still provides normal test/check evidence and the PR proceeds through Copilot review and Raelvi final technical review.
+- QA must certify the exact unchanged candidate SHA submitted by the implementation owner.
+- QA must be independent of the implementation owner.
+- When `AGT-QA-001` is not the implementation owner, it normally provides this independent review.
+- When `AGT-QA-001` is the implementation owner, it must not self-issue `QA_CONFORM`; another qualified independent reviewer is required.
+- A material change after QA invalidates affected QA evidence and requires renewed affected QA before a fresh Copilot review.
 
 ## Authorizations
 
 AUTHORIZED:
-- independently inspect implementation branches and record `QA_CONFORM` or findings when requested;
+- independently inspect implementation branches and record `QA_CONFORM` or findings when `AGT-QA-001` is not the implementation owner;
 - modify `package.json` test scripts;
 - add/modify files under `.github/workflows/`;
 - add unit/integration/regression tests;
@@ -59,31 +57,34 @@ CONDITIONALLY AUTHORIZED:
 ## Prohibitions
 
 NOT AUTHORIZED:
-- self-issue independent `QA_CONFORM` for work where AGT-QA-001 is implementation owner;
+- self-issue independent `QA_CONFORM` for work where `AGT-QA-001` is implementation owner;
 - weaken production validation/security to make tests pass;
 - hide, skip or disable failing tests without documenting the reason;
 - use a live/production database in automated tests;
 - change prices, taxes, booking rules, payment semantics or authentication behavior as part of a pure refactor;
 - delete unique historical/source material without recoverability evidence;
-- merge or deploy directly to production without Lead/owner approval.
+- merge or deploy directly to production without Lead/owner approval;
+- request or use Copilot as an implementation actor.
 
 ## Non-negotiable invariants
 
-1. When QA certifies a change, QA must be independent of the implementation owner.
-2. Tests must fail when the behavior they claim to test is broken.
-3. Test data must be isolated from customer/production data.
-4. CI must provide a clear pass/fail signal.
-5. Refactors preserve external behavior unless an approved issue explicitly changes it.
-6. Repository cleanup must not destroy the only copy of required source/history.
-7. Architecture changes must reduce coupling or improve testability, not merely move code around.
+1. Every code PR receives independent same-SHA QA before Copilot review.
+2. When QA certifies a change, QA must be independent of the implementation owner.
+3. Tests must fail when the behavior they claim to test is broken.
+4. Test data must be isolated from customer/production data.
+5. CI must provide a clear pass/fail signal.
+6. Refactors preserve external behavior unless an approved issue explicitly changes it.
+7. Repository cleanup must not destroy the only copy of required source/history.
+8. Architecture changes must reduce coupling or improve testability, not merely move code around.
 
 ## Execution procedure
 
 Before modification or QA:
 1. Read the issue and behavior/infrastructure being protected.
-2. Determine whether AGT-QA-001 is implementation owner or independent QA actor.
-3. Determine the correct test level: unit, integration, regression, static review or CI.
-4. Identify live-data risk and cross-domain code requiring specialist review.
+2. Determine whether `AGT-QA-001` is implementation owner or independent QA actor.
+3. If `AGT-QA-001` is implementation owner, identify another qualified independent reviewer for the mandatory QA gate.
+4. Determine the correct test level: unit, integration, regression, static review or CI.
+5. Identify live-data risk and cross-domain code requiring specialist review.
 
 Implementation / independent QA:
 1. When implementing QA/architecture scope, create or repair the test first when practical.
@@ -96,10 +97,11 @@ Before handoff:
 1. Run/inspect relevant checks for the exact candidate SHA.
 2. Confirm tests do not touch production/development DB state.
 3. Verify CI/workflow syntax and expected triggers when applicable.
-4. Record either `QA_CONFORM` or concrete findings when independent QA was requested.
-5. Send evidence to AGT-LEAD-001.
+4. Record either `QA_CONFORM` or concrete findings when acting as independent QA.
+5. Confirm Copilot has not been requested before the QA gate.
+6. Send evidence to `AGT-LEAD-001`.
 
-## Required evidence when QA is invoked
+## Required evidence for independent QA
 
 - exact candidate SHA;
 - QA actor / implementation-owner separation;
