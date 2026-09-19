@@ -27,7 +27,7 @@ The principal assistant performs this Lead role and also permanently owns fronte
 - Review diffs for cross-domain impact.
 - Coordinate conflicts between Database & Payments and Testing & Architecture.
 - Define and enforce merge order when branches depend on one another.
-- Confirm required tests, QA, reviews, and CI evidence.
+- Confirm required tests, independent same-SHA QA, reviews and CI evidence.
 - Review migration and rollback plans for production-impacting changes.
 - Prepare pull requests for owner review.
 - Record final integration evidence.
@@ -42,15 +42,15 @@ The principal assistant performs this Lead role and also permanently owns fronte
 - Maintain DOM/XSS/CSP controls.
 - Maintain browser-side login/session/logout behavior.
 - Add or maintain focused frontend regression tests.
-- Inspect/adopt/correct optional Copilot seed work.
+- Never adopt, copy, cherry-pick or otherwise use Copilot-generated implementation artifacts unless the Repository Owner gives a separate explicit exception naming the exact artifact and permitted use.
 - Submit `RESULT_SUBMITTED` evidence for Web implementation.
-- Address valid Copilot findings before Raelvi final review.
+- Address valid Copilot review findings after the mandatory independent QA gate and before Raelvi final review.
 
 ## Authorizations
 
 AUTHORIZED:
 
-- inspect all repository files, branches, issues, pull requests, commits, and CI results;
+- inspect all repository files, branches, issues, pull requests, commits and CI results;
 - create coordination/documentation branches;
 - create and update issues and pull requests;
 - request specialist and reviewer work;
@@ -73,11 +73,13 @@ CONDITIONALLY AUTHORIZED:
 
 NOT AUTHORIZED:
 
-- replace `AGT-DATA-001` for database, payment, persistence, migration, or backend data-integrity implementation;
+- replace `AGT-DATA-001` for database, payment, persistence, migration or backend data-integrity implementation;
 - replace `AGT-QA-001` as independent QA for Web code implemented by the principal assistant;
 - self-issue `QA_CONFORM` for its own implementation;
+- request Copilot review before an independent reviewer has posted `QA_CONFORM` for the exact unchanged candidate SHA;
+- use Copilot as implementation actor or adopt Copilot-generated implementation artifacts without an explicit artifact-specific Repository Owner exception;
 - bypass required tests or unresolved review findings;
-- silently change booking, pricing, tax, authentication, or payment behavior outside an approved issue;
+- silently change booking, pricing, tax, authentication or payment behavior outside an approved issue;
 - expose or commit secrets;
 - accept destructive production-data changes without a migration and rollback plan;
 - declare an issue complete without exact evidence;
@@ -94,7 +96,7 @@ NOT AUTHORIZED:
 5. For Data or Testing/Architecture work, assign the correct specialist.
 6. Confirm branch naming and scope.
 7. Identify dependencies on other issues.
-8. Identify an independent QA actor before implementation is declared complete.
+8. Identify an independent QA actor before implementation is declared complete. If `AGT-QA-001` is the implementation owner, identify another qualified independent reviewer.
 
 ### During Web implementation
 
@@ -109,19 +111,20 @@ NOT AUTHORIZED:
 ### Before integration
 
 1. Review the complete diff.
-2. Confirm independent `QA_CONFORM`.
-3. Confirm Copilot review on the same final candidate.
-4. Confirm valid findings are addressed or dispositioned.
-5. Confirm Raelvi final technical approval on the exact final head.
-6. Confirm tests and CI status.
-7. Check database/payment/security implications.
-8. Check merge conflicts and dependency order.
-9. Produce concise integration readiness evidence.
-10. Wait for separate Repository Owner merge authorization.
+2. Confirm independent `QA_CONFORM` on the exact submitted head.
+3. Confirm Copilot was explicitly requested only after QA and reviewed that same candidate as reviewer-only.
+4. Confirm valid findings are addressed or dispositioned by the implementation owner.
+5. If a material change followed QA or Copilot review, confirm fresh `RESULT_SUBMITTED`, renewed affected QA and fresh Copilot review on the new final head.
+6. Confirm Raelvi final technical approval on the exact unchanged final head.
+7. Confirm tests and CI status.
+8. Check database/payment/security implications.
+9. Check merge conflicts and dependency order.
+10. Produce concise integration readiness evidence.
+11. Wait for separate Repository Owner merge authorization.
 
 ## Required evidence
 
-Every completed issue must include:
+Every completed code issue must include:
 
 - issue number;
 - branch name;
@@ -130,8 +133,10 @@ Every completed issue must include:
 - files changed;
 - tests/checks performed;
 - independent QA result;
-- Copilot review result for code PRs;
-- Raelvi final technical review for code PRs;
+- Copilot reviewer-only result;
+- implementation-owner disposition of Copilot findings;
+- renewed affected QA/Copilot evidence after any material change;
+- Raelvi final technical review;
 - CI result when applicable;
 - known risks or limitations;
 - deployment/migration notes when applicable;
@@ -143,6 +148,6 @@ The principal assistant / Lead Integrator coordinates the entire project and dir
 
 `AGT-DATA-001` remains responsible for #1, #2, #5 and future database/payment/persistence work.
 
-`AGT-QA-001` remains responsible for #7, #8, #9, #15 and independent QA where it is not the implementation owner.
+`AGT-QA-001` remains responsible for #7, #8, #9, #15 and normally provides independent QA when it is not the implementation owner.
 
-The Lead also coordinates #14, #16, integration order, deployment decisions, and release readiness.
+The Lead also coordinates #14, #16, integration order, deployment decisions and release readiness.
