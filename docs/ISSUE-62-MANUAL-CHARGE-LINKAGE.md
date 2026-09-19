@@ -34,17 +34,64 @@ AGT-DATA-001 should:
    - retry/reconciliation behavior that does not create duplicate session/charge records.
 7. Use only isolated test data and mocked Stripe behavior.
 
+## Durable request identity contract
+
+`POST /api/admin/charges` now requires `request_id`, a canonical UUID v4. The
+caller must create it once per logical manual charge with
+`crypto.randomUUID()` and reuse it with the exact same `guest_name`,
+`guest_email`, `description` and `amount` fields for every retry. The server
+persists the normalized UUID on the manual-charge row and a partial unique
+SQLite index atomically arbitrates
+concurrent requests from separate connections or app instances. Stripe's
+idempotency key is derived from that UUID rather than process memory or a
+client-supplied charge/payment status.
+
+The Lead-owned `public/admin.html` caller must retain this immutable pending
+request state across ambiguous network/5xx failures. It must clear the state
+only after HTTP 201 or an explicit operator decision to start a different
+charge. A changed form is a new logical operation and gets a new UUID; an
+unchanged retry reuses the pending UUID. `recovery_charge_id` remains an
+optional compatibility hint but never replaces `request_id` and must refer to
+the row bound to the same UUID.
+
+The explicit error contract is:
+
+- `400 MANUAL_CHARGE_REQUEST_ID_REQUIRED`: no provider call and the caller must
+  generate a UUID for this logical operation.
+- `400 MANUAL_CHARGE_REQUEST_ID_INVALID`: no provider call and the caller must
+  correct its UUID generation/state handling.
+- `409 MANUAL_CHARGE_REQUEST_ID_CONFLICT`: the UUID is already bound to a
+  different row or immutable field set. Do not automatically generate a new
+  UUID and retry.
+- `503 MANUAL_CHARGE_RECOVERY_REQUIRED`: retain the UUID and exact fields then
+  retry the same logical operation.
+- `409 MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED`: do not automatically
+  retry. Show the returned `recovery.charge_id` and require Stripe/database
+  reconciliation.
+
 ## Suggested implementation seam
 
 Keep the change narrow inside the extracted admin/manual-charge route and, if useful, add a small persistence helper under the Data-owned backend layer.
 
 Do not mix this P1 fix with Issue #56's SQLite-driver migration.
 
-## Rollback / compatibility
+## Forward migration / rollback / compatibility
 
-No schema migration should be necessary.
+The forward migration adds nullable `manual_charges.request_id` and the partial
+unique index `idx_manual_charges_request_id`. It does not backfill existing rows:
+inventing an identity could replay a Checkout create whose earlier session ID
+was lost. A matching unresolved legacy row or an explicit replay of an unkeyed
+row therefore fails closed into manual reconciliation before any Stripe create.
 
-Rollback should restore the previous application revision without altering the SQLite file. Any newly introduced reconciliation metadata or schema would require a separate migration/rollback plan before implementation.
+The migration is additive. Rolling the application back leaves the nullable
+column and index in place; older revisions ignore the column and can read the
+same rows. Before an application rollback, drain create traffic and reconcile
+every pending row whose `stripe_session_id` is NULL because the older revision
+does not preserve this protocol on retry. A full schema rollback may drop the
+index after the application rollback but should retain the nullable column to
+avoid a destructive SQLite table rebuild. Re-deploying this revision is
+idempotent. The create endpoint's new required `request_id` is a deliberate
+fail-closed API change and must ship with the Lead-owned admin caller update.
 
 ## Process gates
 

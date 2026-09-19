@@ -1,11 +1,17 @@
 const assert = require("assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const sqlite3 = require("sqlite3").verbose();
 const { registerAdminRoutes } = require("./server/routes/admin-routes");
 
+const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
 const CHARGE = {
   guest_name: "Test Guest",
   guest_email: "guest@example.test",
   description: "Damage deposit",
   amount: 125.5,
+  request_id: REQUEST_ID,
 };
 
 function createFakeApp() {
@@ -64,6 +70,24 @@ function dispatch(handlers, req, res) {
   return Promise.resolve(next());
 }
 
+function execDb(db, sql) {
+  return new Promise((resolve, reject) => {
+    db.exec(sql, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+function getDb(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
+  });
+}
+
+function closeDb(db) {
+  return new Promise((resolve, reject) => {
+    db.close((err) => (err ? reject(err) : resolve()));
+  });
+}
+
 function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}) {
   const rows = new Map();
   const pendingUpdates = [];
@@ -73,6 +97,9 @@ function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}
   return {
     rows,
     pendingUpdates,
+    seedRow(row) {
+      rows.set(row.id, { ...row });
+    },
     get insertCount() {
       return insertCount;
     },
@@ -81,14 +108,24 @@ function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}
     },
     run(sql, params, callback) {
       if (sql.includes("INSERT INTO manual_charges")) {
+        const requestId = params[4];
+        const claimed = [...rows.values()].find(
+          (row) => row.request_id === requestId,
+        );
+        if (claimed) {
+          callback.call({ lastID: 0, changes: 0 }, null);
+          return;
+        }
+
         insertCount += 1;
-        const id = 42;
+        const id = rows.size === 0 ? 42 : Math.max(...rows.keys()) + 1;
         rows.set(id, {
           id,
           guest_name: params[0],
           guest_email: params[1],
           description: params[2],
           amount: params[3],
+          request_id: requestId,
           status: "pending",
           stripe_session_id: null,
           created_at: new Date().toISOString(),
@@ -131,9 +168,21 @@ function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}
         callback(null, rows.get(params[0]));
         return;
       }
+      if (sql.includes("WHERE request_id = ?")) {
+        callback(
+          null,
+          [...rows.values()].find((row) => row.request_id === params[0]),
+        );
+        return;
+      }
+      assert(
+        sql.includes("request_id IS NULL"),
+        `unexpected manual-charge lookup: ${sql}`,
+      );
       const matches = [...rows.values()]
         .filter(
           (row) =>
+            row.request_id == null &&
             row.guest_name === params[0] &&
             row.guest_email === params[1] &&
             row.description === params[2] &&
@@ -304,7 +353,7 @@ async function testStripeSuccessWaitsForPersistence() {
   assert.strictEqual(stripe.createCalls.length, 1);
   assert.strictEqual(
     stripe.createCalls[0].options.idempotencyKey,
-    "manual-charge-42",
+    `manual-charge-${REQUEST_ID}`,
   );
 
   db.completeNextUpdate();
@@ -419,6 +468,23 @@ async function testStripeSessionValidationFailsClosed() {
     ["wrong currency", (session) => ({ ...session, currency: "eur" })],
     ["wrong mode", (session) => ({ ...session, mode: "setup" })],
     [
+      "missing request metadata",
+      (session) => ({
+        ...session,
+        metadata: { ...session.metadata, request_id: undefined },
+      }),
+    ],
+    [
+      "wrong request metadata",
+      (session) => ({
+        ...session,
+        metadata: {
+          ...session.metadata,
+          request_id: "22222222-2222-4222-8222-222222222222",
+        },
+      }),
+    ],
+    [
       "wrong metadata",
       (session) => ({
         ...session,
@@ -454,6 +520,206 @@ async function testStripeSessionValidationFailsClosed() {
   }
 }
 
+async function testRequestIdentityContract() {
+  const db = createManualChargeDb();
+  const handlers = registerManualChargeRoute({
+    db,
+    mockPayments: true,
+    stripe: null,
+    broadcast: () => {},
+  });
+
+  const missing = createFakeResponse();
+  const { request_id: _requestId, ...withoutRequestId } = CHARGE;
+  await dispatch(handlers, { body: withoutRequestId }, missing);
+  assert.strictEqual(missing.statusCode, 400);
+  assert.strictEqual(
+    missing.body.code,
+    "MANUAL_CHARGE_REQUEST_ID_REQUIRED",
+  );
+
+  const invalid = createFakeResponse();
+  await dispatch(
+    handlers,
+    { body: { ...CHARGE, request_id: "not-a-uuid" } },
+    invalid,
+  );
+  assert.strictEqual(invalid.statusCode, 400);
+  assert.strictEqual(
+    invalid.body.code,
+    "MANUAL_CHARGE_REQUEST_ID_INVALID",
+  );
+  assert.strictEqual(db.insertCount, 0);
+
+  const created = createFakeResponse();
+  await dispatch(
+    handlers,
+    { body: { ...CHARGE, status: "paid", stripe_session_id: "client-value" } },
+    created,
+  );
+  assert.strictEqual(created.statusCode, 201);
+  assert.strictEqual(created.body.request_id, REQUEST_ID);
+  assert.strictEqual(
+    db.rows.get(42).status,
+    "pending",
+    "client payment status must not change server-owned state",
+  );
+  assert.strictEqual(
+    db.rows.get(42).stripe_session_id,
+    "mock_charge_42",
+    "client session IDs must be ignored",
+  );
+
+  const conflict = createFakeResponse();
+  await dispatch(
+    handlers,
+    { body: { ...CHARGE, amount: CHARGE.amount + 1 } },
+    conflict,
+  );
+  assert.strictEqual(conflict.statusCode, 409);
+  assert.strictEqual(
+    conflict.body.code,
+    "MANUAL_CHARGE_REQUEST_ID_CONFLICT",
+  );
+  assert.strictEqual(db.insertCount, 1);
+}
+
+async function testLegacyUnkeyedChargeRequiresManualReconciliation() {
+  const db = createManualChargeDb();
+  db.seedRow({
+    id: 17,
+    guest_name: CHARGE.guest_name,
+    guest_email: CHARGE.guest_email,
+    description: CHARGE.description,
+    amount: CHARGE.amount,
+    request_id: null,
+    status: "pending",
+    stripe_session_id: null,
+    created_at: new Date().toISOString(),
+  });
+  const stripe = createFakeStripe();
+  const handlers = registerManualChargeRoute({
+    db,
+    mockPayments: false,
+    stripe,
+    broadcast: () => {},
+  });
+
+  const automatic = createFakeResponse();
+  await dispatch(handlers, { body: { ...CHARGE } }, automatic);
+  assert.strictEqual(automatic.statusCode, 409);
+  assert.strictEqual(
+    automatic.body.code,
+    "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+  );
+  assert.deepStrictEqual(automatic.body.recovery, { charge_id: 17 });
+
+  const explicit = createFakeResponse();
+  await dispatch(
+    handlers,
+    { body: { ...CHARGE, recovery_charge_id: 17 } },
+    explicit,
+  );
+  assert.strictEqual(explicit.statusCode, 409);
+  assert.strictEqual(
+    explicit.body.code,
+    "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+  );
+  assert.strictEqual(db.insertCount, 0);
+  assert.strictEqual(stripe.createCalls.length, 0);
+}
+
+async function testConcurrentConnectionsAtomicallyClaimOneCharge() {
+  const tempRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "manual-charge-concurrency-"),
+  );
+  const databasePath = path.join(tempRoot, "manual-charges.db");
+  const schemaDb = new sqlite3.Database(databasePath);
+  let dbA;
+  let dbB;
+
+  try {
+    await execDb(
+      schemaDb,
+      `CREATE TABLE manual_charges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guest_name TEXT NOT NULL,
+        guest_email TEXT NOT NULL,
+        description TEXT NOT NULL,
+        amount REAL NOT NULL,
+        status TEXT DEFAULT 'pending',
+        stripe_session_id TEXT,
+        request_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        paid_at TEXT
+      );
+      CREATE UNIQUE INDEX idx_manual_charges_request_id
+        ON manual_charges(request_id) WHERE request_id IS NOT NULL;`,
+    );
+    await closeDb(schemaDb);
+
+    dbA = new sqlite3.Database(databasePath);
+    dbB = new sqlite3.Database(databasePath);
+    dbA.configure("busyTimeout", 5000);
+    dbB.configure("busyTimeout", 5000);
+
+    const stripe = createFakeStripe();
+    const handlersA = registerManualChargeRoute({
+      db: dbA,
+      mockPayments: false,
+      stripe,
+      broadcast: () => {},
+    });
+    const handlersB = registerManualChargeRoute({
+      db: dbB,
+      mockPayments: false,
+      stripe,
+      broadcast: () => {},
+    });
+    const responseA = createFakeResponse();
+    const responseB = createFakeResponse();
+
+    await Promise.all([
+      dispatch(handlersA, { body: { ...CHARGE } }, responseA),
+      dispatch(handlersB, { body: { ...CHARGE } }, responseB),
+    ]);
+
+    assert.strictEqual(responseA.statusCode, 201);
+    assert.strictEqual(responseB.statusCode, 201);
+    assert.strictEqual(responseA.body.id, responseB.body.id);
+    assert.strictEqual(
+      responseA.body.stripe_session_id,
+      responseB.body.stripe_session_id,
+    );
+    const persisted = await getDb(
+      dbA,
+      `SELECT COUNT(*) AS count,
+              COUNT(DISTINCT request_id) AS request_count,
+              COUNT(DISTINCT stripe_session_id) AS session_count
+       FROM manual_charges`,
+    );
+    assert.deepStrictEqual(persisted, {
+      count: 1,
+      request_count: 1,
+      session_count: 1,
+    });
+    assert.strictEqual(stripe.createdSessions.length, 1);
+    assert.ok(
+      stripe.createCalls.length >= 1 && stripe.createCalls.length <= 2,
+      "concurrent requests may create concurrently or retrieve the persisted session",
+    );
+    assert.deepStrictEqual(
+      new Set(stripe.createCalls.map((call) => call.options.idempotencyKey)),
+      new Set([`manual-charge-${REQUEST_ID}`]),
+    );
+  } finally {
+    if (dbA) await closeDb(dbA);
+    if (dbB) await closeDb(dbB);
+    if (schemaDb.open) await closeDb(schemaDb);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const originalConsoleError = console.error;
   console.error = () => {};
@@ -464,12 +730,15 @@ async function main() {
     await testStripeFailureUsesIdempotentRecovery();
     await testStripePrunedKeyRequiresManualReconciliation();
     await testStripeSessionValidationFailsClosed();
+    await testRequestIdentityContract();
+    await testLegacyUnkeyedChargeRequiresManualReconciliation();
+    await testConcurrentConnectionsAtomicallyClaimOneCharge();
   } finally {
     console.error = originalConsoleError;
   }
 
   console.log(
-    "PASS: manual-charge ordering, retry recovery, pruning cutoff, and strict Stripe validation",
+    "PASS: manual-charge durability, atomic request claims, legacy reconciliation, pruning cutoff, and strict Stripe validation",
   );
 }
 

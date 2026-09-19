@@ -3,6 +3,18 @@ const { get: getDb, run: runDb } = require("../db-promises");
 
 // Stripe may prune idempotency keys once they are at least 24 hours old.
 const STRIPE_IDEMPOTENCY_SAFE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const MANUAL_CHARGE_REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizeManualChargeRequestId(requestId) {
+  if (
+    typeof requestId !== "string" ||
+    !MANUAL_CHARGE_REQUEST_ID_PATTERN.test(requestId)
+  ) {
+    return null;
+  }
+  return requestId.toLowerCase();
+}
 
 function manualChargeMatches(row, {
   guest_name,
@@ -20,6 +32,7 @@ function manualChargeMatches(row, {
 
 function manualChargeSessionParams({
   chargeId,
+  requestId,
   guest_name,
   guest_email,
   description,
@@ -47,13 +60,14 @@ function manualChargeSessionParams({
     cancel_url: `${domain}/cancel.html`,
     metadata: {
       charge_id: String(chargeId),
+      request_id: requestId,
       guest_name,
       guest_email,
     },
   };
 }
 
-function validateStripeSession(session, chargeId, charge) {
+function validateStripeSession(session, chargeId, requestId, charge) {
   const metadata = session && session.metadata;
   const expectedAmount = Math.round(Number(charge.amount) * 100);
 
@@ -62,6 +76,7 @@ function validateStripeSession(session, chargeId, charge) {
     !session.id ||
     !metadata ||
     metadata.charge_id !== String(chargeId) ||
+    metadata.request_id !== requestId ||
     metadata.guest_name !== charge.guest_name ||
     metadata.guest_email !== charge.guest_email ||
     session.mode !== "payment" ||
@@ -73,6 +88,55 @@ function validateStripeSession(session, chargeId, charge) {
     error.requiresManualReconciliation = true;
     throw error;
   }
+}
+
+async function claimManualCharge(db, requestId, charge) {
+  await runDb(
+    db,
+    `INSERT INTO manual_charges
+       (guest_name, guest_email, description, amount, request_id)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(request_id) WHERE request_id IS NOT NULL DO NOTHING`,
+    [
+      charge.guest_name,
+      charge.guest_email,
+      charge.description,
+      charge.amount,
+      requestId,
+    ],
+  );
+
+  const claimed = await getDb(
+    db,
+    `SELECT * FROM manual_charges WHERE request_id = ?`,
+    [requestId],
+  );
+  if (!claimed) {
+    throw new Error("Manual charge request claim was not persisted");
+  }
+  return claimed;
+}
+
+async function findLegacyUnresolvedCharge(db, charge) {
+  return getDb(
+    db,
+    `SELECT * FROM manual_charges
+     WHERE request_id IS NULL
+       AND guest_name = ?
+       AND guest_email = ?
+       AND description = ?
+       AND amount = ?
+       AND status = 'pending'
+       AND stripe_session_id IS NULL
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [
+      charge.guest_name,
+      charge.guest_email,
+      charge.description,
+      charge.amount,
+    ],
+  );
 }
 
 function manualChargeCreatedAtMs(createdAt) {
@@ -121,6 +185,12 @@ function manualChargeReconciliationBody(error, chargeId) {
     code: "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
     recovery: { charge_id: chargeId },
   };
+}
+
+function manualChargeRequestBody(error, code, chargeId) {
+  const body = { error, code };
+  if (chargeId != null) body.recovery = { charge_id: chargeId };
+  return body;
 }
 
 function registerAdminRoutes(app, {
@@ -216,6 +286,7 @@ function registerAdminRoutes(app, {
       guest_email,
       description,
       amount,
+      request_id: rawRequestId,
       recovery_charge_id: recoveryChargeId,
     } = req.body;
     if (!guest_name || !guest_email || !description || !amount) {
@@ -224,11 +295,39 @@ function registerAdminRoutes(app, {
           "Missing required fields: guest_name, guest_email, description, amount",
       });
     }
-    if (amount <= 0) return res.status(400).json({ error: "Amount must be greater than 0" });
+    const normalizedAmount = Number(amount);
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+      return res
+        .status(400)
+        .json({ error: "Amount must be greater than 0" });
+    }
 
-    const charge = { guest_name, guest_email, description, amount };
+    if (rawRequestId == null || rawRequestId === "") {
+      return res.status(400).json(
+        manualChargeRequestBody(
+          "A request_id is required for safe manual-charge retries",
+          "MANUAL_CHARGE_REQUEST_ID_REQUIRED",
+        ),
+      );
+    }
+    const requestId = normalizeManualChargeRequestId(rawRequestId);
+    if (!requestId) {
+      return res.status(400).json(
+        manualChargeRequestBody(
+          "request_id must be a canonical UUID v4",
+          "MANUAL_CHARGE_REQUEST_ID_INVALID",
+        ),
+      );
+    }
+
+    const charge = {
+      guest_name,
+      guest_email,
+      description,
+      amount: normalizedAmount,
+    };
     let chargeId;
-    let existingCharge = null;
+    let existingCharge;
 
     try {
       if (recoveryChargeId != null) {
@@ -242,46 +341,59 @@ function registerAdminRoutes(app, {
           `SELECT * FROM manual_charges WHERE id = ?`,
           [chargeId],
         );
+        if (!existingCharge) {
+          return res.status(404).json({ error: "Manual charge not found" });
+        }
       } else {
-        if (mockPayments || stripe) {
-          existingCharge = await getDb(
-            db,
-            `SELECT * FROM manual_charges
-             WHERE guest_name = ?
-               AND guest_email = ?
-               AND description = ?
-               AND amount = ?
-               AND status = 'pending'
-               AND stripe_session_id IS NULL
-             ORDER BY created_at DESC, id DESC
-             LIMIT 1`,
-            [guest_name, guest_email, description, amount],
-          );
-        }
+        existingCharge = await getDb(
+          db,
+          `SELECT * FROM manual_charges WHERE request_id = ?`,
+          [requestId],
+        );
 
-        if (existingCharge) {
-          chargeId = existingCharge.id;
-        } else {
-          const inserted = await runDb(
-            db,
-            `INSERT INTO manual_charges
-               (guest_name, guest_email, description, amount)
-             VALUES (?, ?, ?, ?)`,
-            [guest_name, guest_email, description, amount],
-          );
-          chargeId = inserted.lastID;
+        if (!existingCharge) {
+          const legacyCharge = await findLegacyUnresolvedCharge(db, charge);
+          if (legacyCharge) {
+            return res.status(409).json(
+              manualChargeReconciliationBody(
+                "A matching legacy charge has no durable request identity; reconcile it in Stripe before continuing",
+                legacyCharge.id,
+              ),
+            );
+          }
+
+          existingCharge = await claimManualCharge(db, requestId, charge);
         }
+        chargeId = existingCharge.id;
       }
 
-      if (recoveryChargeId != null && !existingCharge) {
-        return res.status(404).json({ error: "Manual charge not found" });
+      if (existingCharge.request_id == null) {
+        return res.status(409).json(
+          manualChargeReconciliationBody(
+            "This legacy charge has no durable request identity; reconcile it in Stripe before continuing",
+            chargeId,
+          ),
+        );
       }
-      if (existingCharge && !manualChargeMatches(existingCharge, charge)) {
-        return res.status(409).json({
-          error: "Recovery request does not match the existing manual charge",
-        });
+      if (existingCharge.request_id !== requestId) {
+        return res.status(409).json(
+          manualChargeRequestBody(
+            "request_id does not match the existing manual charge",
+            "MANUAL_CHARGE_REQUEST_ID_CONFLICT",
+            chargeId,
+          ),
+        );
       }
-      if (existingCharge && existingCharge.status !== "pending") {
+      if (!manualChargeMatches(existingCharge, charge)) {
+        return res.status(409).json(
+          manualChargeRequestBody(
+            "request_id is already bound to different manual-charge fields",
+            "MANUAL_CHARGE_REQUEST_ID_CONFLICT",
+            chargeId,
+          ),
+        );
+      }
+      if (existingCharge.status !== "pending") {
         return res.status(409).json({
           error: "Only pending manual charges can be recovered",
         });
@@ -290,7 +402,7 @@ function registerAdminRoutes(app, {
       return res.status(500).json({ error: dbErr.message });
     }
 
-    let sessionId = existingCharge && existingCharge.stripe_session_id;
+    let sessionId = existingCharge.stripe_session_id;
     let sessionUrl = null;
 
     try {
@@ -308,7 +420,7 @@ function registerAdminRoutes(app, {
         if (sessionId != null) {
           session = await stripe.checkout.sessions.retrieve(sessionId);
         } else {
-          if (existingCharge && !canRetryStripeCreate(existingCharge)) {
+          if (!canRetryStripeCreate(existingCharge)) {
             return res.status(409).json(
               manualChargeReconciliationBody(
                 "Automatic recovery is no longer safe; reconcile this charge in Stripe before continuing",
@@ -317,12 +429,17 @@ function registerAdminRoutes(app, {
             );
           }
           session = await stripe.checkout.sessions.create(
-            manualChargeSessionParams({ chargeId, ...charge, domain }),
-            { idempotencyKey: `manual-charge-${chargeId}` },
+            manualChargeSessionParams({
+              chargeId,
+              requestId,
+              ...charge,
+              domain,
+            }),
+            { idempotencyKey: `manual-charge-${requestId}` },
           );
         }
 
-        validateStripeSession(session, chargeId, charge);
+        validateStripeSession(session, chargeId, requestId, charge);
         sessionId = session.id;
         sessionUrl = session.url;
       } else if (recoveryChargeId != null) {
@@ -366,6 +483,7 @@ function registerAdminRoutes(app, {
     return res.status(201).json({
       message: "Charge created",
       id: chargeId,
+      request_id: requestId,
       stripe_session_id: sessionId,
       url: sessionUrl,
     });
