@@ -67,13 +67,21 @@ function manualChargeSessionParams({
   };
 }
 
-function validateStripeSession(session, chargeId, requestId, charge) {
+function validateStripeSession(
+  session,
+  chargeId,
+  requestId,
+  charge,
+  { expectedSessionId = null, requirePaid = false } = {},
+) {
   const metadata = session && session.metadata;
   const expectedAmount = Math.round(Number(charge.amount) * 100);
 
   if (
     !session ||
     !session.id ||
+    (expectedSessionId != null && session.id !== expectedSessionId) ||
+    (requirePaid && session.payment_status !== "paid") ||
     !metadata ||
     metadata.charge_id !== String(chargeId) ||
     metadata.request_id !== requestId ||
@@ -393,15 +401,33 @@ function registerAdminRoutes(app, {
           ),
         );
       }
-      if (existingCharge.status !== "pending") {
-        return res.status(409).json({
-          error: "Only pending manual charges can be recovered",
-        });
+      if (
+        existingCharge.status === "paid" &&
+        existingCharge.stripe_session_id == null
+      ) {
+        return res.status(409).json(
+          manualChargeReconciliationBody(
+            "This paid manual charge has no durable Stripe session linkage; reconcile it in Stripe before continuing",
+            chargeId,
+          ),
+        );
+      }
+      if (
+        existingCharge.status !== "pending" &&
+        existingCharge.status !== "paid"
+      ) {
+        return res.status(409).json(
+          manualChargeReconciliationBody(
+            "This manual charge is not pending or durably paid; reconcile it before continuing",
+            chargeId,
+          ),
+        );
       }
     } catch (dbErr) {
       return res.status(500).json({ error: dbErr.message });
     }
 
+    const isPaidRetry = existingCharge.status === "paid";
     let sessionId = existingCharge.stripe_session_id;
     let sessionUrl = null;
 
@@ -409,6 +435,14 @@ function registerAdminRoutes(app, {
       if (mockPayments) {
         const expectedSessionId = `mock_charge_${chargeId}`;
         if (sessionId != null && sessionId !== expectedSessionId) {
+          if (isPaidRetry) {
+            return res.status(409).json(
+              manualChargeReconciliationBody(
+                "The paid manual charge is linked to an unexpected mock payment session",
+                chargeId,
+              ),
+            );
+          }
           return res.status(409).json({
             error: "Manual charge is already linked to another session",
           });
@@ -439,10 +473,13 @@ function registerAdminRoutes(app, {
           );
         }
 
-        validateStripeSession(session, chargeId, requestId, charge);
+        validateStripeSession(session, chargeId, requestId, charge, {
+          expectedSessionId: existingCharge.stripe_session_id,
+          requirePaid: isPaidRetry,
+        });
         sessionId = session.id;
         sessionUrl = session.url;
-      } else if (recoveryChargeId != null) {
+      } else if (isPaidRetry || recoveryChargeId != null) {
         return res.status(503).json(
           manualChargeRecoveryBody(
             "Payment provider is unavailable; retry this existing charge when configuration is restored",
@@ -465,7 +502,7 @@ function registerAdminRoutes(app, {
       );
     }
 
-    if (sessionId) {
+    if (sessionId && !isPaidRetry) {
       try {
         await persistManualChargeSession(db, chargeId, sessionId);
       } catch (dbErr) {
@@ -479,7 +516,7 @@ function registerAdminRoutes(app, {
       }
     }
 
-    broadcastAdminUpdate();
+    if (!isPaidRetry) broadcastAdminUpdate();
     return res.status(201).json({
       message: "Charge created",
       id: chargeId,

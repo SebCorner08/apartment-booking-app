@@ -648,13 +648,18 @@
         const billingMessage = document.getElementById("billing-message");
         const chargesTbody = document.getElementById("charges-tbody");
         const noChargesMsg = document.getElementById("no-charges");
+        const sendInvoiceButton = document.getElementById("btn-send-invoice");
         const billingInputs = [
           "billing-name",
           "billing-email",
           "billing-desc",
           "billing-amount",
         ].map((id) => document.getElementById(id));
+        const manualChargeStorageKey = "pending-manual-charge-v1";
+        const manualChargeRequestIdPattern =
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
         let pendingManualChargeRequest = null;
+        let manualChargeStorageError = null;
 
         function createManualChargeRequestId() {
           if (typeof window.crypto.randomUUID === "function") {
@@ -671,13 +676,101 @@
           return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
         }
 
-        function clearPendingManualChargeRequest() {
-          pendingManualChargeRequest = null;
+        function readManualChargeFields() {
+          return {
+            name: document.getElementById("billing-name").value.trim(),
+            email: document.getElementById("billing-email").value.trim(),
+            desc: document.getElementById("billing-desc").value.trim(),
+            amount: parseFloat(
+              document.getElementById("billing-amount").value,
+            ),
+          };
         }
 
-        billingInputs.forEach((input) => {
-          input.addEventListener("input", clearPendingManualChargeRequest);
-        });
+        function persistPendingManualChargeRequest(request) {
+          try {
+            window.sessionStorage.setItem(
+              manualChargeStorageKey,
+              JSON.stringify(request),
+            );
+            return true;
+          } catch (error) {
+            manualChargeStorageError =
+              "This browser cannot safely retain a pending payment request. Enable session storage or use another browser.";
+            return false;
+          }
+        }
+
+        function clearPendingManualChargeRequest() {
+          pendingManualChargeRequest = null;
+          try {
+            window.sessionStorage.removeItem(manualChargeStorageKey);
+            manualChargeStorageError = null;
+            return true;
+          } catch (error) {
+            manualChargeStorageError =
+              "This browser could not clear the saved payment request. Reconcile it before starting another charge.";
+            return false;
+          }
+        }
+
+        function restorePendingManualChargeRequest() {
+          let serialized;
+          try {
+            serialized = window.sessionStorage.getItem(manualChargeStorageKey);
+          } catch (error) {
+            manualChargeStorageError =
+              "This browser cannot safely retain a pending payment request. Enable session storage or use another browser.";
+            return;
+          }
+          if (!serialized) return;
+
+          try {
+            const stored = JSON.parse(serialized);
+            const fields = stored.fields;
+            const validFields =
+              fields &&
+              typeof fields.name === "string" &&
+              fields.name.length > 0 &&
+              typeof fields.email === "string" &&
+              fields.email.length > 0 &&
+              typeof fields.desc === "string" &&
+              fields.desc.length > 0 &&
+              Number.isFinite(fields.amount) &&
+              fields.amount > 0;
+            const validRecoveryId =
+              stored.recoveryChargeId == null ||
+              (Number.isSafeInteger(stored.recoveryChargeId) &&
+                stored.recoveryChargeId > 0);
+
+            if (
+              !manualChargeRequestIdPattern.test(stored.requestId) ||
+              !validFields ||
+              !validRecoveryId ||
+              stored.signature !== JSON.stringify(fields)
+            ) {
+              throw new Error("Invalid pending manual-charge state");
+            }
+
+            pendingManualChargeRequest = stored;
+            document.getElementById("billing-name").value = fields.name;
+            document.getElementById("billing-email").value = fields.email;
+            document.getElementById("billing-desc").value = fields.desc;
+            document.getElementById("billing-amount").value = String(
+              fields.amount,
+            );
+          } catch (error) {
+            manualChargeStorageError =
+              "A saved payment request could not be verified. Reconcile it before starting another charge.";
+          }
+        }
+
+        function setManualChargeFormBusy(isBusy) {
+          sendInvoiceButton.disabled = isBusy;
+          billingInputs.forEach((input) => {
+            input.disabled = isBusy;
+          });
+        }
 
         function showBillingMessage(text, type = "success") {
           billingMessage.textContent = text;
@@ -685,6 +778,26 @@
           setTimeout(() => {
             billingMessage.className = "billing-message";
           }, 5000);
+        }
+
+        restorePendingManualChargeRequest();
+        billingInputs.forEach((input) => {
+          input.addEventListener("input", () => {
+            const fieldsChanged =
+              pendingManualChargeRequest &&
+              JSON.stringify(readManualChargeFields()) !==
+                pendingManualChargeRequest.signature;
+            if (fieldsChanged || manualChargeStorageError) {
+              clearPendingManualChargeRequest();
+            }
+          });
+        });
+        if (manualChargeStorageError) {
+          showBillingMessage(manualChargeStorageError, "error");
+        } else if (pendingManualChargeRequest) {
+          showBillingMessage(
+            "A pending payment request was restored. Retry it unchanged or edit a field to start a different charge.",
+          );
         }
 
         async function fetchAndRenderCharges() {
@@ -721,15 +834,9 @@
         }
 
         // Send invoice
-        document
-          .getElementById("btn-send-invoice")
-          .addEventListener("click", async () => {
-            const name = document.getElementById("billing-name").value.trim();
-            const email = document.getElementById("billing-email").value.trim();
-            const desc = document.getElementById("billing-desc").value.trim();
-            const amount = parseFloat(
-              document.getElementById("billing-amount").value,
-            );
+        sendInvoiceButton.addEventListener("click", async () => {
+            const requestFields = readManualChargeFields();
+            const { name, email, desc, amount } = requestFields;
 
             if (!name || !email || !desc || !amount || amount <= 0) {
               showBillingMessage(
@@ -739,18 +846,32 @@
               return;
             }
 
-            const requestFields = { name, email, desc, amount };
             const requestSignature = JSON.stringify(requestFields);
+            if (manualChargeStorageError) {
+              showBillingMessage(manualChargeStorageError, "error");
+              return;
+            }
             try {
               if (
                 !pendingManualChargeRequest ||
                 pendingManualChargeRequest.signature !== requestSignature
               ) {
-                pendingManualChargeRequest = {
+                const nextRequest = {
                   requestId: createManualChargeRequestId(),
                   signature: requestSignature,
                   recoveryChargeId: null,
+                  fields: requestFields,
                 };
+                if (!persistPendingManualChargeRequest(nextRequest)) {
+                  showBillingMessage(manualChargeStorageError, "error");
+                  return;
+                }
+                pendingManualChargeRequest = nextRequest;
+              } else if (
+                !persistPendingManualChargeRequest(pendingManualChargeRequest)
+              ) {
+                showBillingMessage(manualChargeStorageError, "error");
+                return;
               }
             } catch (error) {
               showBillingMessage(
@@ -760,13 +881,15 @@
               return;
             }
             const activeManualChargeRequest = pendingManualChargeRequest;
+            setManualChargeFormBusy(true);
 
             try {
+              const activeFields = activeManualChargeRequest.fields;
               const requestBody = {
-                guest_name: name,
-                guest_email: email,
-                description: desc,
-                amount,
+                guest_name: activeFields.name,
+                guest_email: activeFields.email,
+                description: activeFields.desc,
+                amount: activeFields.amount,
                 request_id: activeManualChargeRequest.requestId,
               };
               if (activeManualChargeRequest.recoveryChargeId != null) {
@@ -786,6 +909,15 @@
                 const recoveryChargeId = result.recovery?.charge_id;
                 if (recoveryChargeId != null) {
                   activeManualChargeRequest.recoveryChargeId = recoveryChargeId;
+                  if (
+                    pendingManualChargeRequest === activeManualChargeRequest &&
+                    !persistPendingManualChargeRequest(
+                      activeManualChargeRequest,
+                    )
+                  ) {
+                    showBillingMessage(manualChargeStorageError, "error");
+                    return;
+                  }
                 }
 
                 if (result.code === "MANUAL_CHARGE_RECOVERY_REQUIRED") {
@@ -838,16 +970,22 @@
               // Do not erase a different charge the operator began while this
               // request was in flight.
               if (pendingManualChargeRequest === activeManualChargeRequest) {
-                clearPendingManualChargeRequest();
+                const clearedPendingRequest =
+                  clearPendingManualChargeRequest();
                 document.getElementById("billing-name").value = "";
                 document.getElementById("billing-email").value = "";
                 document.getElementById("billing-desc").value = "";
                 document.getElementById("billing-amount").value = "";
+                if (!clearedPendingRequest) {
+                  showBillingMessage(manualChargeStorageError, "error");
+                }
               }
 
               fetchAndRenderCharges();
             } catch (error) {
               showBillingMessage(`Error: ${error.message}`, "error");
+            } finally {
+              setManualChargeFormBusy(false);
             }
           });
 

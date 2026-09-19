@@ -213,6 +213,9 @@ function createFakeStripe({ transformSession = (session) => session } = {}) {
     createdSessions,
     createCalls,
     retrieveCalls,
+    seedRetrievedSession(sessionId, session) {
+      sessionsById.set(sessionId, session);
+    },
     checkout: {
       sessions: {
         async create(params, options) {
@@ -245,6 +248,36 @@ function createFakeStripe({ transformSession = (session) => session } = {}) {
       sessionsByKey.clear();
     },
   };
+}
+
+function paidStripeSession({ session = {}, metadata = {} } = {}) {
+  return {
+    id: "cs_test_42",
+    url: "https://checkout.stripe.test/42",
+    payment_status: "paid",
+    amount_total: Math.round(CHARGE.amount * 100),
+    currency: "usd",
+    mode: "payment",
+    ...session,
+    metadata: {
+      charge_id: "42",
+      request_id: REQUEST_ID,
+      guest_name: CHARGE.guest_name,
+      guest_email: CHARGE.guest_email,
+      ...metadata,
+    },
+  };
+}
+
+function seedProtocolCharge(db, overrides = {}) {
+  db.seedRow({
+    id: 42,
+    ...CHARGE,
+    status: "pending",
+    stripe_session_id: null,
+    created_at: new Date().toISOString(),
+    ...overrides,
+  });
 }
 
 function registerManualChargeRoute({ db, mockPayments, stripe, broadcast }) {
@@ -418,6 +451,230 @@ async function testStripeFailureUsesIdempotentRecovery() {
   );
   assert.strictEqual(db.rows.get(42).stripe_session_id, "cs_test_42");
   assert.strictEqual(broadcasts, 1);
+}
+
+async function testPaidStripeRetryRecoversLinkedSession() {
+  const db = createManualChargeDb();
+  seedProtocolCharge(db, {
+    status: "paid",
+    stripe_session_id: "cs_test_42",
+  });
+  const stripe = createFakeStripe();
+  stripe.seedRetrievedSession("cs_test_42", paidStripeSession());
+  let broadcasts = 0;
+  const handlers = registerManualChargeRoute({
+    db,
+    mockPayments: false,
+    stripe,
+    broadcast: () => {
+      broadcasts += 1;
+    },
+  });
+
+  const recovered = createFakeResponse();
+  await dispatch(handlers, { body: { ...CHARGE } }, recovered);
+
+  assert.strictEqual(recovered.statusCode, 201);
+  assert.strictEqual(recovered.body.id, 42);
+  assert.strictEqual(recovered.body.request_id, REQUEST_ID);
+  assert.strictEqual(recovered.body.stripe_session_id, "cs_test_42");
+  assert.strictEqual(
+    recovered.body.url,
+    "https://checkout.stripe.test/42",
+  );
+  assert.deepStrictEqual(stripe.retrieveCalls, ["cs_test_42"]);
+  assert.strictEqual(stripe.createCalls.length, 0);
+  assert.strictEqual(stripe.createdSessions.length, 0);
+  assert.strictEqual(db.insertCount, 0);
+  assert.strictEqual(db.updateCount, 0);
+  assert.strictEqual(broadcasts, 0);
+}
+
+async function testPaidStripeRetryFailsClosed() {
+  const cases = [
+    {
+      name: "paid row without linkage",
+      row: { status: "paid", stripe_session_id: null },
+      expectedStatus: 409,
+      expectedCode: "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+      expectedRetrieves: [],
+    },
+    {
+      name: "retrieved session ID mismatch",
+      row: { status: "paid", stripe_session_id: "cs_test_42" },
+      retrieved: paidStripeSession({ session: { id: "cs_other_42" } }),
+      expectedStatus: 409,
+      expectedCode: "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+      expectedRetrieves: ["cs_test_42"],
+    },
+    {
+      name: "retrieved request mismatch",
+      row: { status: "paid", stripe_session_id: "cs_test_42" },
+      retrieved: paidStripeSession({
+        metadata: {
+          request_id: "22222222-2222-4222-8222-222222222222",
+        },
+      }),
+      expectedStatus: 409,
+      expectedCode: "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+      expectedRetrieves: ["cs_test_42"],
+    },
+    {
+      name: "retrieved session is not paid",
+      row: { status: "paid", stripe_session_id: "cs_test_42" },
+      retrieved: paidStripeSession({
+        session: { payment_status: "unpaid" },
+      }),
+      expectedStatus: 409,
+      expectedCode: "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+      expectedRetrieves: ["cs_test_42"],
+    },
+    {
+      name: "other nonpending state",
+      row: { status: "cancelled", stripe_session_id: "cs_test_42" },
+      expectedStatus: 409,
+      expectedCode: "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+      expectedRetrieves: [],
+    },
+  ];
+
+  for (const testCase of cases) {
+    const db = createManualChargeDb();
+    seedProtocolCharge(db, testCase.row);
+    const stripe = createFakeStripe();
+    if (testCase.retrieved) {
+      stripe.seedRetrievedSession("cs_test_42", testCase.retrieved);
+    }
+    let broadcasts = 0;
+    const handlers = registerManualChargeRoute({
+      db,
+      mockPayments: false,
+      stripe,
+      broadcast: () => {
+        broadcasts += 1;
+      },
+    });
+
+    const response = createFakeResponse();
+    await dispatch(handlers, { body: { ...CHARGE } }, response);
+
+    assert.strictEqual(
+      response.statusCode,
+      testCase.expectedStatus,
+      testCase.name,
+    );
+    assert.strictEqual(response.body.code, testCase.expectedCode, testCase.name);
+    assert.deepStrictEqual(
+      response.body.recovery,
+      { charge_id: 42 },
+      testCase.name,
+    );
+    assert.deepStrictEqual(
+      stripe.retrieveCalls,
+      testCase.expectedRetrieves,
+      testCase.name,
+    );
+    assert.strictEqual(stripe.createCalls.length, 0, testCase.name);
+    assert.strictEqual(stripe.createdSessions.length, 0, testCase.name);
+    assert.strictEqual(db.insertCount, 0, testCase.name);
+    assert.strictEqual(db.updateCount, 0, testCase.name);
+    assert.strictEqual(broadcasts, 0, testCase.name);
+  }
+}
+
+async function testPaidMockAndNoProviderBehavior() {
+  const mockDb = createManualChargeDb();
+  seedProtocolCharge(mockDb, {
+    status: "paid",
+    stripe_session_id: "mock_charge_42",
+  });
+  let mockBroadcasts = 0;
+  const mockHandlers = registerManualChargeRoute({
+    db: mockDb,
+    mockPayments: true,
+    stripe: null,
+    broadcast: () => {
+      mockBroadcasts += 1;
+    },
+  });
+  const mockResponse = createFakeResponse();
+  await dispatch(mockHandlers, { body: { ...CHARGE } }, mockResponse);
+  assert.strictEqual(mockResponse.statusCode, 201);
+  assert.strictEqual(mockResponse.body.request_id, REQUEST_ID);
+  assert.strictEqual(mockResponse.body.stripe_session_id, "mock_charge_42");
+  assert.strictEqual(mockDb.updateCount, 0);
+  assert.strictEqual(mockBroadcasts, 0);
+
+  const mismatchedMockDb = createManualChargeDb();
+  seedProtocolCharge(mismatchedMockDb, {
+    status: "paid",
+    stripe_session_id: "mock_charge_other",
+  });
+  const mismatchedMockHandlers = registerManualChargeRoute({
+    db: mismatchedMockDb,
+    mockPayments: true,
+    stripe: null,
+    broadcast: () => {},
+  });
+  const mismatchedMockResponse = createFakeResponse();
+  await dispatch(
+    mismatchedMockHandlers,
+    { body: { ...CHARGE } },
+    mismatchedMockResponse,
+  );
+  assert.strictEqual(mismatchedMockResponse.statusCode, 409);
+  assert.strictEqual(
+    mismatchedMockResponse.body.code,
+    "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+  );
+  assert.strictEqual(mismatchedMockDb.updateCount, 0);
+
+  const unavailableDb = createManualChargeDb();
+  seedProtocolCharge(unavailableDb, {
+    status: "paid",
+    stripe_session_id: "cs_test_42",
+  });
+  let unavailableBroadcasts = 0;
+  const unavailableHandlers = registerManualChargeRoute({
+    db: unavailableDb,
+    mockPayments: false,
+    stripe: null,
+    broadcast: () => {
+      unavailableBroadcasts += 1;
+    },
+  });
+  const unavailableResponse = createFakeResponse();
+  await dispatch(
+    unavailableHandlers,
+    { body: { ...CHARGE } },
+    unavailableResponse,
+  );
+  assert.strictEqual(unavailableResponse.statusCode, 503);
+  assert.strictEqual(
+    unavailableResponse.body.code,
+    "MANUAL_CHARGE_RECOVERY_REQUIRED",
+  );
+  assert.strictEqual(unavailableDb.updateCount, 0);
+  assert.strictEqual(unavailableBroadcasts, 0);
+
+  const pendingDb = createManualChargeDb();
+  let pendingBroadcasts = 0;
+  const pendingHandlers = registerManualChargeRoute({
+    db: pendingDb,
+    mockPayments: false,
+    stripe: null,
+    broadcast: () => {
+      pendingBroadcasts += 1;
+    },
+  });
+  const pendingResponse = createFakeResponse();
+  await dispatch(pendingHandlers, { body: { ...CHARGE } }, pendingResponse);
+  assert.strictEqual(pendingResponse.statusCode, 201);
+  assert.strictEqual(pendingResponse.body.request_id, REQUEST_ID);
+  assert.strictEqual(pendingResponse.body.stripe_session_id, null);
+  assert.strictEqual(pendingDb.insertCount, 1);
+  assert.strictEqual(pendingDb.updateCount, 0);
+  assert.strictEqual(pendingBroadcasts, 1);
 }
 
 async function testStripePrunedKeyRequiresManualReconciliation() {
@@ -728,6 +985,9 @@ async function main() {
     await testMockFailureRecoversExistingRow();
     await testStripeSuccessWaitsForPersistence();
     await testStripeFailureUsesIdempotentRecovery();
+    await testPaidStripeRetryRecoversLinkedSession();
+    await testPaidStripeRetryFailsClosed();
+    await testPaidMockAndNoProviderBehavior();
     await testStripePrunedKeyRequiresManualReconciliation();
     await testStripeSessionValidationFailsClosed();
     await testRequestIdentityContract();
@@ -738,7 +998,7 @@ async function main() {
   }
 
   console.log(
-    "PASS: manual-charge durability, atomic request claims, legacy reconciliation, pruning cutoff, and strict Stripe validation",
+    "PASS: manual-charge durability, paid retry recovery, atomic request claims, legacy reconciliation, pruning cutoff, and strict Stripe validation",
   );
 }
 
