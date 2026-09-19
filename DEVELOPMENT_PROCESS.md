@@ -18,11 +18,12 @@ A chat instruction never silently skips scope, ownership, evidence or merge auth
 
 1. The principal assistant is Lead Integrator and permanent Web Implementation Owner.
 2. `AGT-DATA-001` owns Database & Payments work unless the Repository Owner explicitly grants a named exception.
-3. `AGT-QA-001` owns Testing & Architecture implementation and provides independent QA when risk-based verification is requested.
+3. `AGT-QA-001` owns Testing & Architecture implementation and normally provides independent QA for code owned by another implementation owner.
 4. GitHub Copilot is reviewer-only and must never generate or modify implementation artifacts.
 5. The implementation owner must own the final branch head, tests/evidence and `RESULT_SUBMITTED`.
-6. **Raelvi (`raelvim`) gives the final technical review word on every code PR** against the exact final head SHA.
-7. **Only the Repository Owner can authorize merge to `main`.**
+6. Every code PR requires independent same-SHA `QA_CONFORM` after `RESULT_SUBMITTED` and before any Copilot reviewer request.
+7. **Raelvi (`raelvim`) gives the final technical review word on every code PR** against the exact final head SHA after QA, Copilot and findings disposition are complete.
+8. **Only the Repository Owner can authorize merge to `main`.**
 
 ## Roles
 
@@ -36,31 +37,23 @@ Coordinates issues, checks scope/branch identity, controls integration readiness
 Owns database, persistence, migration, payment, Stripe and backend data-integrity implementation.
 
 ### AGT-QA-001 — Testing & Architecture
-Owns test/CI/architecture implementation and performs independent QA when invoked by risk assessment or explicit request.
+Owns test/CI/architecture implementation and normally provides independent QA when another actor owns implementation. If `AGT-QA-001` owns a code change, another qualified independent reviewer must provide `QA_CONFORM`.
 
 ### GitHub Copilot
-Reviewer-only after `RESULT_SUBMITTED`. Findings return to the implementation owner. Copilot must not implement fixes.
+Reviewer-only after implementation-owner `RESULT_SUBMITTED` and independent same-SHA `QA_CONFORM`. Findings return to the implementation owner. Copilot must not implement fixes or produce implementation artifacts for adoption without an explicit artifact-specific Repository Owner exception.
 
 ### Raelvi (`raelvim`)
-Final technical reviewer for code PRs after Copilot findings and any required independent QA/fixes are resolved.
+Final technical reviewer for code PRs after independent QA, Copilot findings and any required renewed QA/review are resolved on the exact unchanged head.
 
 ## Mandatory process chain
 
 For code changes:
 
-`ISSUE_CREATED → ISSUE_ACCEPTED → IMPLEMENTATION_OWNER_ASSIGNED → BRANCH_CREATED → IMPLEMENTATION_IN_PROGRESS → RESULT_SUBMITTED → COPILOT_REVIEWED → RAELVI_APPROVED → LEAD_APPROVED → OWNER_APPROVED → MERGE_AUTHORIZED → MERGED → DEPLOYMENT_DECIDED → DEPLOYED/NOT_REQUIRED → VERIFIED → CLOSED`
+`ISSUE_CREATED → ISSUE_ACCEPTED → IMPLEMENTATION_OWNER_ASSIGNED → BRANCH_CREATED → IMPLEMENTATION_IN_PROGRESS → RESULT_SUBMITTED → QA_CONFORM → COPILOT_REVIEWED → RAELVI_APPROVED → LEAD_APPROVED → OWNER_APPROVED → MERGE_AUTHORIZED → MERGED → DEPLOYMENT_DECIDED → DEPLOYED/NOT_REQUIRED → VERIFIED → CLOSED`
 
-`QA_CONFORM` is an **optional risk-based evidence state**, not a mandatory step on every PR.
+Independent QA is a **mandatory evidence state on every code PR**.
 
-Independent QA should be invoked for higher-risk work such as:
-- production DB migrations or destructive data operations;
-- payment/Stripe semantic changes;
-- authentication/session/security changes;
-- broad architecture/refactor or CI/test-infrastructure changes;
-- unresolved failures or ambiguous behavior;
-- explicit request from Copilot, Raelvi, Lead or Repository Owner.
-
-When QA is invoked it must be independent of the implementation owner and tied to the exact SHA.
+When QA is performed it must be independent of the implementation owner and tied to the exact unchanged SHA. If `AGT-QA-001` is the implementation owner, another qualified independent reviewer must provide the QA result.
 
 ## State rules
 
@@ -89,19 +82,25 @@ Required evidence:
 - known limitations;
 - migration/rollback notes where applicable.
 
-### QA_CONFORM — optional
+### QA_CONFORM — mandatory for code PRs
 Actor: qualified independent reviewer.
 
-Use only when risk-based policy or an explicit reviewer/owner request requires independent QA. Record `QA_CONFORM` or concrete findings on the exact SHA.
+Requirements:
+- reviewer is independent of the implementation owner;
+- exact candidate SHA matches `RESULT_SUBMITTED`;
+- relevant tests/checks and known gaps are recorded;
+- the candidate is not modified while being certified.
+
+If findings are found, return to `IMPLEMENTATION_IN_PROGRESS`. After material fixes, the implementation owner must submit a fresh `RESULT_SUBMITTED` for the new head and independent QA must be repeated.
 
 ### COPILOT_REVIEWED
-Copilot reviews the exact submitted candidate as reviewer-only. Findings return to the implementation owner. Material fixes require fresh affected review and any required QA.
+Only after same-SHA `QA_CONFORM`, Copilot is explicitly requested to review the existing PR as reviewer-only. Findings return to the implementation owner. Copilot must not implement fixes. Material fixes require fresh `RESULT_SUBMITTED`, renewed affected QA and a fresh Copilot review.
 
 ### RAELVI_APPROVED
-Raelvi reviews the exact final head after Copilot findings and any required QA/fixes are resolved. Any material change afterward requires a new final review.
+Raelvi reviews the exact final unchanged head after independent QA, Copilot findings disposition and any required renewed QA/Copilot review are complete. Any material change afterward requires the affected chain to be repeated before final approval.
 
 ### LEAD_APPROVED
-Lead confirms scope, owner evidence, relevant tests, Copilot disposition, any required QA and Raelvi approval all refer to the same final head.
+Lead confirms scope, owner evidence, tests, independent QA, Copilot disposition and Raelvi approval all refer to the same final unchanged head.
 
 ### OWNER_APPROVED
 Repository Owner accepts the technical result for the exact PR/head. This is not merge permission.
@@ -136,8 +135,9 @@ Forward progress stops for:
 - missing migration/rollback plan for stateful/destructive work;
 - material code change after review without revalidation;
 - unresolved review findings;
-- missing risk-based QA when explicitly required;
+- missing independent same-SHA `QA_CONFORM` before Copilot on a code PR;
 - missing Copilot review or explicit Repository Owner waiver;
+- missing renewed affected QA and fresh Copilot review after a material change;
 - missing Raelvi final technical approval;
 - merge conflicts/dependency conflicts;
 - missing explicit Repository Owner merge authorization;
@@ -145,19 +145,19 @@ Forward progress stops for:
 
 ## Review order
 
-Normal code PR:
+Mandatory code PR:
 
-`Implementation + owner tests/evidence → Copilot review → implementation owner addresses findings → optional risk-based QA if required → Raelvi final technical review → Lead readiness → Owner approval → explicit MERGE_AUTHORIZED`
+`Implementation + owner tests/evidence → RESULT_SUBMITTED → independent same-SHA QA_CONFORM → explicitly requested Copilot reviewer-only review → implementation owner addresses/dispositions findings → renewed affected QA + fresh Copilot review after material changes → Raelvi final technical review → Lead readiness → Owner approval → explicit MERGE_AUTHORIZED`
 
-Risk-based QA may also be run before Copilot if the Lead/owner chooses. The final head must have all required evidence and reviews current at the time of Raelvi approval.
+The final head must have all required evidence and reviews current at the time of Raelvi approval.
 
 ## Recovery
 
 ### QA or review failed
-Return to `IMPLEMENTATION_IN_PROGRESS`, preserve failed evidence, fix on the issue branch and repeat affected checks/reviews.
+Return to `IMPLEMENTATION_IN_PROGRESS`, preserve failed evidence, fix on the issue branch and repeat affected checks/reviews. A material fix requires a fresh implementation-owner `RESULT_SUBMITTED`, renewed affected QA and fresh Copilot review before Raelvi.
 
 ### Unauthorized Copilot implementation artifact
-Stop. Do not adopt, copy, cherry-pick or merge it without an explicit Repository Owner exception naming the artifact and permitted use.
+Stop. Do not adopt, copy, cherry-pick or merge it without an explicit Repository Owner exception naming the exact artifact and permitted use.
 
 ### Unauthorized merge
 Stop immediately. Record the deviation. Do not write directly to `main` to repair it. Prepare a separate rollback/recovery PR and wait for owner disposition.
@@ -175,10 +175,10 @@ actor: <implementation owner | reviewer | owner>
 branch: <branch>
 head_sha: <sha>
 evidence: <tests/reviews/checks>
-qa: <NOT_REQUIRED | REQUIRED | QA_CONFORM | findings>
+qa: <REQUIRED | QA_CONFORM | findings>
 next_action: <action>
 ```
 
 ## Completion
 
-A code task is complete only when the final implementation is owned, relevant tests/evidence are recorded, Copilot review is complete or explicitly waived by the Repository Owner, any required risk-based QA is complete, Raelvi has approved the exact final head, merge was explicitly authorized and post-merge/deployment verification is complete when applicable.
+A code task is complete only when the final implementation is owned, relevant tests/evidence are recorded, independent same-SHA `QA_CONFORM` is complete, Copilot has reviewed as reviewer-only or the Repository Owner has explicitly waived it, all findings are dispositioned by the implementation owner, any material post-review change has renewed affected QA and fresh Copilot review, Raelvi has approved the exact final unchanged head, merge was explicitly authorized and post-merge/deployment verification is complete when applicable.
