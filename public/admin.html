@@ -648,6 +648,36 @@
         const billingMessage = document.getElementById("billing-message");
         const chargesTbody = document.getElementById("charges-tbody");
         const noChargesMsg = document.getElementById("no-charges");
+        const billingInputs = [
+          "billing-name",
+          "billing-email",
+          "billing-desc",
+          "billing-amount",
+        ].map((id) => document.getElementById(id));
+        let pendingManualChargeRequest = null;
+
+        function createManualChargeRequestId() {
+          if (typeof window.crypto.randomUUID === "function") {
+            return window.crypto.randomUUID();
+          }
+
+          const bytes = new Uint8Array(16);
+          window.crypto.getRandomValues(bytes);
+          bytes[6] = (bytes[6] & 0x0f) | 0x40;
+          bytes[8] = (bytes[8] & 0x3f) | 0x80;
+          const hex = Array.from(bytes, (byte) =>
+            byte.toString(16).padStart(2, "0"),
+          ).join("");
+          return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+        }
+
+        function clearPendingManualChargeRequest() {
+          pendingManualChargeRequest = null;
+        }
+
+        billingInputs.forEach((input) => {
+          input.addEventListener("input", clearPendingManualChargeRequest);
+        });
 
         function showBillingMessage(text, type = "success") {
           billingMessage.textContent = text;
@@ -709,22 +739,80 @@
               return;
             }
 
+            const requestFields = { name, email, desc, amount };
+            const requestSignature = JSON.stringify(requestFields);
             try {
+              if (
+                !pendingManualChargeRequest ||
+                pendingManualChargeRequest.signature !== requestSignature
+              ) {
+                pendingManualChargeRequest = {
+                  requestId: createManualChargeRequestId(),
+                  signature: requestSignature,
+                  recoveryChargeId: null,
+                };
+              }
+            } catch (error) {
+              showBillingMessage(
+                "This browser cannot create a secure payment request identifier.",
+                "error",
+              );
+              return;
+            }
+            const activeManualChargeRequest = pendingManualChargeRequest;
+
+            try {
+              const requestBody = {
+                guest_name: name,
+                guest_email: email,
+                description: desc,
+                amount,
+                request_id: activeManualChargeRequest.requestId,
+              };
+              if (activeManualChargeRequest.recoveryChargeId != null) {
+                requestBody.recovery_charge_id =
+                  activeManualChargeRequest.recoveryChargeId;
+              }
+
               const response = await fetchWithAuth(
                 `${API_URL}/api/admin/charges`,
                 {
                   method: "POST",
-                  body: JSON.stringify({
-                    guest_name: name,
-                    guest_email: email,
-                    description: desc,
-                    amount,
-                  }),
+                  body: JSON.stringify(requestBody),
                 },
               );
               const result = await response.json();
-              if (!response.ok)
+              if (!response.ok) {
+                const recoveryChargeId = result.recovery?.charge_id;
+                if (recoveryChargeId != null) {
+                  activeManualChargeRequest.recoveryChargeId = recoveryChargeId;
+                }
+
+                if (result.code === "MANUAL_CHARGE_RECOVERY_REQUIRED") {
+                  showBillingMessage(
+                    `Charge #${recoveryChargeId} is saved but its payment link is not yet durable. Click Send Payment Link again to retry this same charge safely.`,
+                    "error",
+                  );
+                  return;
+                }
+
+                if (
+                  result.code ===
+                  "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED"
+                ) {
+                  showBillingMessage(
+                    `Charge #${recoveryChargeId} requires manual Stripe reconciliation. No new payment session was created.`,
+                    "error",
+                  );
+                  return;
+                }
+
                 throw new Error(result.error || "Failed to create charge");
+              }
+
+              if (result.request_id !== activeManualChargeRequest.requestId) {
+                throw new Error("The charge response request ID did not match");
+              }
 
               if (result.url) {
                 // Copy payment link to clipboard for the admin to send
@@ -747,11 +835,15 @@
                 );
               }
 
-              // Clear form
-              document.getElementById("billing-name").value = "";
-              document.getElementById("billing-email").value = "";
-              document.getElementById("billing-desc").value = "";
-              document.getElementById("billing-amount").value = "";
+              // Do not erase a different charge the operator began while this
+              // request was in flight.
+              if (pendingManualChargeRequest === activeManualChargeRequest) {
+                clearPendingManualChargeRequest();
+                document.getElementById("billing-name").value = "";
+                document.getElementById("billing-email").value = "";
+                document.getElementById("billing-desc").value = "";
+                document.getElementById("billing-amount").value = "";
+              }
 
               fetchAndRenderCharges();
             } catch (error) {
