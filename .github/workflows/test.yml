@@ -15,7 +15,29 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - name: Verify manifest and lockfile runtime metadata
-        run: node -e "const pkg=require('./package.json'); const lock=require('./package-lock.json'); if (pkg.engines.node !== lock.packages[''].engines.node) { console.error('package.json and package-lock.json engines.node differ'); process.exit(1); }"
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const lock = require('./package-lock.json');
+          const manifestNode = pkg.engines?.node;
+          const lockfileNode = lock.packages?.['']?.engines?.node;
+
+          if (typeof manifestNode !== 'string' || typeof lockfileNode !== 'string') {
+            console.error('Missing engines.node metadata', {
+              packageJson: manifestNode ?? '<missing>',
+              packageLock: lockfileNode ?? '<missing>',
+            });
+            process.exit(1);
+          }
+
+          if (manifestNode !== lockfileNode) {
+            console.error('engines.node metadata differs', {
+              packageJson: manifestNode,
+              packageLock: lockfileNode,
+            });
+            process.exit(1);
+          }
+          NODE
       - run: npm ci
       - name: Rebuild sqlite3 from source
         run: npm rebuild sqlite3 --build-from-source
