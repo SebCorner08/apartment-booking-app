@@ -1,6 +1,11 @@
 const ical = require("node-ical");
 
-function createCalendarService({ db, airbnbIcalUrl, broadcastAdminUpdate }) {
+function createCalendarService({
+  db,
+  airbnbIcalUrl,
+  broadcastAdminUpdate,
+  icalClient = ical,
+}) {
   function registerCalendarRoute(app) {
     app.get("/api/calendar.ics", (req, res) => {
       const sql =
@@ -51,7 +56,7 @@ END:VEVENT
     if (!airbnbIcalUrl) return;
 
     try {
-      const events = await ical.async.fromURL(airbnbIcalUrl);
+      const events = await icalClient.async.fromURL(airbnbIcalUrl);
       const parsedEvents = Object.values(events).filter(
         (event) => event.type === "VEVENT" && event.start && event.end && event.uid,
       );
