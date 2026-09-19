@@ -922,7 +922,7 @@
 
                 if (result.code === "MANUAL_CHARGE_RECOVERY_REQUIRED") {
                   showBillingMessage(
-                    `Charge #${recoveryChargeId} is saved but its payment link is not yet durable. Click Send Payment Link again to retry this same charge safely.`,
+                    `Charge #${recoveryChargeId} requires recovery. Keep these fields unchanged and click Send Payment Link again to continue this same charge safely.`,
                     "error",
                   );
                   return;
@@ -933,7 +933,7 @@
                   "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED"
                 ) {
                   showBillingMessage(
-                    `Charge #${recoveryChargeId} requires manual Stripe reconciliation. No new payment session was created.`,
+                    `Charge #${recoveryChargeId} requires manual Stripe reconciliation before any retry. Do not create a new charge until it is reconciled.`,
                     "error",
                   );
                   return;
