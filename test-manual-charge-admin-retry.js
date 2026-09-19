@@ -4,7 +4,7 @@ const vm = require("vm");
 
 const admin = fs.readFileSync("public/admin.html", "utf8");
 const flowStart = admin.indexOf("// --- MANUAL BILLING ---");
-const flowEnd = admin.indexOf("// Handle charge action buttons", flowStart);
+const flowEnd = admin.indexOf("// --- INICIALIZAR ---", flowStart);
 
 assert(
   flowStart !== -1 && flowEnd > flowStart,
@@ -14,6 +14,8 @@ assert(
 const flow = admin.slice(flowStart, flowEnd);
 const sendStart = flow.indexOf("// Send invoice");
 const sendFlow = flow.slice(sendStart);
+const actionStart = flow.indexOf("// Handle charge action buttons");
+const actionFlow = flow.slice(actionStart);
 
 assert(
   flow.includes("createManualChargeRequestId") &&
@@ -91,6 +93,11 @@ assert(
     sendFlow.includes('showBillingMessage(manualChargeStorageError, "error")'),
   "storage failure must stop a reload-unsafe submission",
 );
+assert(
+  actionFlow.includes("clearResolvedManualChargeRequest(chargeId)") &&
+    actionFlow.includes("if (!response.ok)"),
+  "successful settlement or deletion must clear only its recovered request",
+);
 
 function createElement(value = "") {
   return {
@@ -145,10 +152,11 @@ function createFlowHarness({
   const context = {
     API_URL: "https://api.example.test",
     Uint8Array,
-    console,
+    console: { log() {}, warn() {}, error() {} },
     fetchWithAuth,
     navigator: { clipboard: { writeText: async () => {} } },
     setTimeout() {},
+    confirm: () => true,
     window: {
       crypto: {
         randomUUID: () => uuid,
@@ -174,6 +182,33 @@ function createFlowHarness({
   return {
     elements,
     click: elements.get("btn-send-invoice").listeners.click,
+    actionClick: elements.get("charges-tbody").listeners.click,
+  };
+}
+
+function pendingManualChargeState(recoveryChargeId = 73) {
+  const fields = {
+    name: "Recovered Guest",
+    email: "recovered@example.test",
+    desc: "Recovered charge",
+    amount: 42,
+  };
+  return {
+    requestId: "11111111-1111-4111-8111-111111111111",
+    signature: JSON.stringify(fields),
+    recoveryChargeId,
+    fields,
+  };
+}
+
+function chargeActionTarget(className, id = "73") {
+  return {
+    dataset: { id },
+    classList: {
+      contains(candidate) {
+        return candidate === "btn-action" || candidate === className;
+      },
+    },
   };
 }
 
@@ -320,7 +355,100 @@ async function testReloadRecovery() {
   );
 }
 
+async function testResolvedChargeActionsClearStoredRequest() {
+  const storageKey = "pending-manual-charge-v1";
+
+  const failedPayBacking = new Map([
+    [storageKey, JSON.stringify(pendingManualChargeState())],
+  ]);
+  const failedPay = createFlowHarness({
+    storage: createStorage(failedPayBacking),
+    fetchWithAuth: async (_url, options) => {
+      if (options?.method === "POST") {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: "Manual payment was rejected" }),
+        };
+      }
+      return { ok: true, json: async () => [] };
+    },
+  });
+  await failedPay.actionClick({
+    target: chargeActionTarget("btn-mark-paid"),
+  });
+  assert.strictEqual(
+    failedPayBacking.has(storageKey),
+    true,
+    "a rejected manual settlement must retain the pending retry identity",
+  );
+
+  const successfulPayBacking = new Map([
+    [storageKey, JSON.stringify(pendingManualChargeState())],
+  ]);
+  const successfulPay = createFlowHarness({
+    storage: createStorage(successfulPayBacking),
+    fetchWithAuth: async (_url, options) => {
+      if (options?.method === "POST") {
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => [] };
+    },
+  });
+  await successfulPay.actionClick({
+    target: chargeActionTarget("btn-mark-paid"),
+  });
+  assert.strictEqual(
+    successfulPayBacking.has(storageKey),
+    false,
+    "a successful manual settlement must clear its pending retry identity",
+  );
+
+  const successfulDeleteBacking = new Map([
+    [storageKey, JSON.stringify(pendingManualChargeState())],
+  ]);
+  const successfulDelete = createFlowHarness({
+    storage: createStorage(successfulDeleteBacking),
+    fetchWithAuth: async (_url, options) => {
+      if (options?.method === "DELETE") {
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => [] };
+    },
+  });
+  await successfulDelete.actionClick({
+    target: chargeActionTarget("btn-charge-delete"),
+  });
+  assert.strictEqual(
+    successfulDeleteBacking.has(storageKey),
+    false,
+    "a successful deletion must clear its pending retry identity",
+  );
+
+  const differentChargeBacking = new Map([
+    [storageKey, JSON.stringify(pendingManualChargeState())],
+  ]);
+  const differentCharge = createFlowHarness({
+    storage: createStorage(differentChargeBacking),
+    fetchWithAuth: async (_url, options) => {
+      if (options?.method === "POST") {
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => [] };
+    },
+  });
+  await differentCharge.actionClick({
+    target: chargeActionTarget("btn-mark-paid", "74"),
+  });
+  assert.strictEqual(
+    differentChargeBacking.has(storageKey),
+    true,
+    "settling another charge must not clear the active retry identity",
+  );
+}
+
 testReloadRecovery()
+  .then(testResolvedChargeActionsClearStoredRequest)
   .then(() =>
     console.log("admin manual-charge retry identity regression check passed"),
   )

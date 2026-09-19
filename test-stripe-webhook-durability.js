@@ -318,17 +318,32 @@ async function testKeyedManualChargeRaceConvergence() {
   assert.strictEqual(webhookFirst.statusCode, 200);
   assert.strictEqual(webhookFirstBroadcasts, 1);
 
-  // This is the guarded linkage write used by the admin route. If the webhook
-  // wins the race, writing the same session remains a successful convergence.
+  const webhookFirstRowBeforeRouteLink = await get(
+    webhookFirstDb,
+    `SELECT status, stripe_session_id, paid_at
+     FROM manual_charges WHERE id = ?`,
+    [KEYED_CHARGE.id],
+  );
+  assert.strictEqual(webhookFirstRowBeforeRouteLink.status, "paid");
+  assert.strictEqual(
+    webhookFirstRowBeforeRouteLink.stripe_session_id,
+    KEYED_CHARGE.sessionId,
+  );
+  assert.ok(webhookFirstRowBeforeRouteLink.paid_at);
+
+  // This mirrors the admin route's compare-and-set linkage write. If the
+  // webhook wins the race, the paid row is no longer eligible for mutation;
+  // the route's subsequent read recognizes the matching session as convergence.
   const routeLinkAfterWebhook = await run(
     webhookFirstDb,
     `UPDATE manual_charges
      SET stripe_session_id = ?
      WHERE id = ?
-       AND (stripe_session_id IS NULL OR stripe_session_id = ?)`,
-    [KEYED_CHARGE.sessionId, KEYED_CHARGE.id, KEYED_CHARGE.sessionId],
+       AND status = 'pending'
+       AND stripe_session_id IS NULL`,
+    [KEYED_CHARGE.sessionId, KEYED_CHARGE.id],
   );
-  assert.strictEqual(routeLinkAfterWebhook.changes, 1);
+  assert.strictEqual(routeLinkAfterWebhook.changes, 0);
 
   const webhookFirstRow = await get(
     webhookFirstDb,
@@ -336,12 +351,11 @@ async function testKeyedManualChargeRaceConvergence() {
      FROM manual_charges WHERE id = ?`,
     [KEYED_CHARGE.id],
   );
-  assert.strictEqual(webhookFirstRow.status, "paid");
-  assert.strictEqual(
-    webhookFirstRow.stripe_session_id,
-    KEYED_CHARGE.sessionId,
+  assert.deepStrictEqual(
+    webhookFirstRow,
+    webhookFirstRowBeforeRouteLink,
+    "late route linkage changed the webhook-confirmed row",
   );
-  assert.ok(webhookFirstRow.paid_at);
 
   const duplicate = await invoke({
     db: webhookFirstDb,
