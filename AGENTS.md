@@ -35,31 +35,28 @@ The implementation owner owns the final branch head, tests/evidence and `RESULT_
 
 GitHub Copilot is **reviewer-only**.
 
-Copilot must never create or modify implementation code, branches, commits, PRs, patches or fixes. It may review an existing PR after `RESULT_SUBMITTED` on the exact candidate SHA. Findings return to the implementation owner.
+Copilot must never create or modify implementation code, branches, commits, PRs, patches or fixes. Copilot may only be explicitly requested to review an existing PR after the implementation owner has posted `RESULT_SUBMITTED` for the exact candidate SHA and an independent reviewer has posted `QA_CONFORM` for that same unchanged SHA. Findings return to the implementation owner.
+
+Any Copilot-generated implementation artifact is unauthorized and must not be adopted, copied, cherry-picked or otherwise used unless the Repository Owner gives a separate explicit exception naming the exact artifact and permitted use.
 
 ## Independent QA
 
-Independent QA is **risk-based, not mandatory for every PR**.
+Independent QA is **mandatory for every code PR**.
 
-Use `AGT-QA-001` or another qualified independent reviewer when:
-- a production DB migration or destructive data operation is involved;
-- payment/Stripe semantics change;
-- authentication/session/security behavior changes materially;
-- broad architecture/refactor or CI/test-infrastructure work is involved;
-- relevant tests fail or behavior is ambiguous;
-- Copilot, Raelvi, the Lead or Repository Owner requests additional verification.
-
-When independent QA is used, it must be independent of the implementation owner and tied to the exact candidate SHA.
+- The reviewer must be independent of the implementation owner.
+- `QA_CONFORM` must identify the exact unchanged candidate SHA submitted by the implementation owner.
+- `AGT-QA-001` normally provides independent QA when another actor owns implementation.
+- If `AGT-QA-001` is the implementation owner, another qualified independent reviewer must provide `QA_CONFORM`; `AGT-QA-001` may not self-certify.
+- Copilot cannot be requested until this same-SHA QA gate is complete.
+- A material change after QA or Copilot review invalidates affected evidence and requires renewed affected QA plus a fresh Copilot review.
 
 ## Final technical review
 
 **Raelvi (`raelvim`) has the final technical review word on every code PR.**
 
-Normal sequence:
+Mandatory sequence:
 
-`Implementation + owner tests/evidence → Copilot review → owner fixes/disposition → optional risk-based QA if required → Raelvi final technical review → Repository Owner merge authorization → merge`
-
-If risk-based QA is required earlier by the Lead or owner, it may run before Copilot. The only strict ordering requirement is that Raelvi final review occurs after Copilot findings and any required QA/fixes are resolved on the exact final head.
+`Implementation + owner tests/evidence → RESULT_SUBMITTED → independent same-SHA QA_CONFORM → explicitly requested Copilot reviewer-only review → implementation-owner fixes/disposition → renewed affected QA + fresh Copilot review after material changes → Raelvi final technical review → Repository Owner merge authorization → merge`
 
 Raelvi technical approval is not merge authorization.
 
@@ -67,25 +64,24 @@ Raelvi technical approval is not merge authorization.
 
 All implementation work follows [`DEVELOPMENT_PROCESS.md`](DEVELOPMENT_PROCESS.md).
 
-Mandatory chain:
+Mandatory code-PR chain:
 
-`ISSUE_CREATED → ISSUE_ACCEPTED → IMPLEMENTATION_OWNER_ASSIGNED → BRANCH_CREATED → IMPLEMENTATION_IN_PROGRESS → RESULT_SUBMITTED → COPILOT_REVIEWED → RAELVI_APPROVED → LEAD_APPROVED → OWNER_APPROVED → MERGE_AUTHORIZED → MERGED → DEPLOYMENT_DECIDED → DEPLOYED/NOT_REQUIRED → VERIFIED → CLOSED`
-
-`QA_CONFORM` is optional risk-based evidence inserted when independent QA is required.
+`ISSUE_CREATED → ISSUE_ACCEPTED → IMPLEMENTATION_OWNER_ASSIGNED → BRANCH_CREATED → IMPLEMENTATION_IN_PROGRESS → RESULT_SUBMITTED → QA_CONFORM → COPILOT_REVIEWED → RAELVI_APPROVED → LEAD_APPROVED → OWNER_APPROVED → MERGE_AUTHORIZED → MERGED → DEPLOYMENT_DECIDED → DEPLOYED/NOT_REQUIRED → VERIFIED → CLOSED`
 
 Rules:
 1. One issue maps to one primary implementation branch and one primary PR.
 2. Evidence belongs to the exact branch/head SHA.
-3. Material changes invalidate affected review/QA evidence.
+3. Material changes invalidate affected QA/review evidence and require renewed affected QA plus fresh Copilot review.
 4. No implementation owner silently expands issue scope.
 5. No actor may expose, commit, rotate or replace production secrets without explicit Repository Owner authorization.
 6. Production DB changes require migration/rollback planning when applicable.
 7. Payment-flow changes preserve idempotency and server-authoritative prices.
 8. Refactors preserve visible behavior unless the issue explicitly authorizes a change.
 9. `MERGED` requires separate explicit Repository Owner authorization for that exact PR/change.
-10. A code PR cannot reach final technical approval without Raelvi reviewing the exact final head.
+10. A code PR cannot reach final technical approval without Raelvi reviewing the exact final unchanged head after QA, Copilot and findings disposition are complete.
 11. Copilot cannot own implementation or implement review fixes.
-12. Independent QA is invoked by risk or explicit request, not automatically on every PR.
+12. Independent same-SHA `QA_CONFORM` is mandatory before any Copilot reviewer request on every code PR.
+13. Unauthorized Copilot-generated implementation artifacts must not be adopted without an explicit artifact-specific Repository Owner exception.
 
 ## Agent definitions
 
@@ -102,4 +98,4 @@ Rules:
 
 ## Canonical evidence
 
-Use GitHub issues, branches, commits, PRs, tests/CI, reviews, merge records and deployment evidence as the canonical execution record. Do not create redundant status documents when GitHub evidence is sufficient.
+Use GitHub issues, branches, commits, PRs, tests/CI, reviews, merges, deployments and verification evidence as the canonical execution record. Do not create redundant status documents when GitHub evidence is sufficient.
