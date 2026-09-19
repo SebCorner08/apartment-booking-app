@@ -102,6 +102,83 @@ For every implementation result record evidence tied to the exact commit SHA:
 
 Never claim tests/build/deployment passed without execution evidence from the same material revision.
 
+## 5A. Mandatory gate sign-off and PR status matrix
+
+Every process gate in Section 8 must be **explicitly signed off when it is completed**. An underlying action, green CI run, reviewer request, merge event or deployment event does not by itself mark the gate complete. The responsible actor must record the sign-off in canonical GitHub evidence.
+
+### Required sign-off record
+
+Every completed gate/check must record:
+
+- gate/check name;
+- PR number;
+- branch;
+- exact candidate/head SHA when the gate is revision-bound;
+- responsible actor and role;
+- status: `SIGNED`, `PENDING`, `BLOCKED` or `N/A`;
+- evidence identifier/link (CI run, review, comment, merge commit, deployment ID, etc.);
+- timestamp;
+- concise notes for any exception, waiver, blocker or `N/A` decision.
+
+A gate may be marked `N/A` only when the process truly does not apply to that PR. The Lead must explicitly sign the `N/A` decision with a reason. Silence or omission never means `N/A`.
+
+A material head-SHA change invalidates every downstream SHA-bound sign-off affected by that change. Those cells must immediately return to `PENDING` until renewed on the new exact head.
+
+### Mandatory cross-PR status table
+
+Every multi-PR coordination report, handoff, review-readiness report, release-readiness report and owner-action report must include **one status matrix** with:
+
+- one row for every required check/gate below;
+- one column for every active PR in scope;
+- no active PR omitted;
+- exact status in every cell.
+
+Use these cell forms:
+
+- `✅ SIGNED — <actor> — <SHA/evidence>`
+- `⏳ PENDING — <next actor/action>`
+- `⛔ BLOCKED — <reason>`
+- `➖ N/A — <Lead sign-off + reason>`
+
+The required matrix rows are:
+
+| Required check / gate |
+| --- |
+| BUILD_VERIFICATION read |
+| Issue/scope accepted |
+| Implementation owner assigned |
+| Branch exists and is synchronized to intended baseline |
+| Implementation complete |
+| Owner tests / exact-head CI complete |
+| RESULT_SUBMITTED signed by implementation owner |
+| Independent same-SHA QA_CONFORM |
+| Required specialist/domain review(s) complete |
+| Copilot reviewer-only review complete |
+| Copilot findings disposition complete |
+| Renewed QA/Copilot after material changes, if any |
+| Raelvi final technical review complete |
+| LEAD_APPROVED |
+| OWNER_APPROVED |
+| MERGE_AUTHORIZED |
+| MERGED |
+| DEPLOYMENT_DECIDED |
+| Production deployment authorization, when deployment will occur |
+| DEPLOYED / NOT_REQUIRED |
+| Post-deployment / runtime VERIFIED |
+| CLOSED |
+
+For a code PR, no downstream cell may be marked complete out of sequence. For a documentation/operations-only PR, code-only gates may be marked `N/A` only with explicit Lead sign-off and rationale.
+
+### Sign-off discipline
+
+- The actor responsible for a gate signs that gate; another actor must not impersonate the signer.
+- Lead records and verifies canonical evidence but does not manufacture specialist, QA, Copilot, Raelvi or Repository Owner sign-offs.
+- A requested review is not a completed review.
+- A successful CI run is evidence for testing but is not `RESULT_SUBMITTED`, `QA_CONFORM`, `RAELVI_APPROVED` or merge authorization.
+- Raelvi is reserved for the final technical review unless the Repository Owner explicitly assigns Raelvi another role for a specific PR.
+- Repository Owner merge authorization and production deployment authorization are separate sign-offs whenever merging will trigger deployment.
+- After every meaningful transition, update the matrix so the current state is visible without reconstructing history from comments.
+
 ## 6. Blocking conditions
 
 Forward progress stops for:
