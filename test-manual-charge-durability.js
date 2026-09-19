@@ -91,6 +91,7 @@ function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}
           amount: params[3],
           status: "pending",
           stripe_session_id: null,
+          created_at: new Date().toISOString(),
         });
         callback.call({ lastID: id, changes: 1 }, null);
         return;
@@ -126,7 +127,22 @@ function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}
     },
     get(sql, params, callback) {
       assert(sql.includes("FROM manual_charges"));
-      callback(null, rows.get(params[0]));
+      if (sql.includes("WHERE id = ?")) {
+        callback(null, rows.get(params[0]));
+        return;
+      }
+      const matches = [...rows.values()]
+        .filter(
+          (row) =>
+            row.guest_name === params[0] &&
+            row.guest_email === params[1] &&
+            row.description === params[2] &&
+            Number(row.amount) === Number(params[3]) &&
+            row.status === "pending" &&
+            row.stripe_session_id == null,
+        )
+        .sort((left, right) => right.id - left.id);
+      callback(null, matches[0]);
     },
     completeNextUpdate() {
       const complete = pendingUpdates.shift();
@@ -136,14 +152,16 @@ function createManualChargeDb({ delayedUpdates = false, failedUpdates = 0 } = {}
   };
 }
 
-function createFakeStripe() {
+function createFakeStripe({ transformSession = (session) => session } = {}) {
   const sessionsByKey = new Map();
   const sessionsById = new Map();
+  const createdSessions = [];
   const createCalls = [];
   const retrieveCalls = [];
 
   return {
     sessionsByKey,
+    createdSessions,
     createCalls,
     retrieveCalls,
     checkout: {
@@ -152,16 +170,17 @@ function createFakeStripe() {
           createCalls.push({ params, options });
           let session = sessionsByKey.get(options.idempotencyKey);
           if (!session) {
-            session = {
+            session = transformSession({
               id: `cs_test_${params.metadata.charge_id}`,
               url: `https://checkout.stripe.test/${params.metadata.charge_id}`,
               amount_total: params.line_items[0].price_data.unit_amount,
               currency: params.line_items[0].price_data.currency,
               mode: params.mode,
               metadata: params.metadata,
-            };
+            });
             sessionsByKey.set(options.idempotencyKey, session);
             sessionsById.set(session.id, session);
+            createdSessions.push(session);
           }
           return session;
         },
@@ -172,6 +191,9 @@ function createFakeStripe() {
           return session;
         },
       },
+    },
+    pruneIdempotencyKeys() {
+      sessionsByKey.clear();
     },
   };
 }
@@ -254,11 +276,7 @@ async function testMockFailureRecoversExistingRow() {
   assert.strictEqual(broadcasts, 0);
 
   const recovered = createFakeResponse();
-  await dispatch(
-    handlers,
-    { body: { ...CHARGE, recovery_charge_id: 42 } },
-    recovered,
-  );
+  await dispatch(handlers, { body: { ...CHARGE } }, recovered);
   assert.strictEqual(recovered.statusCode, 201);
   assert.strictEqual(recovered.body.stripe_session_id, "mock_charge_42");
   assert.strictEqual(db.insertCount, 1, "recovery must not insert a duplicate row");
@@ -328,16 +346,13 @@ async function testStripeFailureUsesIdempotentRecovery() {
   await dispatch(handlers, { body: { ...CHARGE } }, failed);
 
   assert.strictEqual(failed.statusCode, 503);
+  assert.strictEqual(failed.body.code, "MANUAL_CHARGE_RECOVERY_REQUIRED");
   assert.deepStrictEqual(failed.body.recovery, { charge_id: 42 });
   assert.strictEqual(stripe.sessionsByKey.size, 1);
   assert.strictEqual(broadcasts, 0);
 
   const recovered = createFakeResponse();
-  await dispatch(
-    handlers,
-    { body: { ...CHARGE, recovery_charge_id: 42 } },
-    recovered,
-  );
+  await dispatch(handlers, { body: { ...CHARGE } }, recovered);
 
   assert.strictEqual(recovered.statusCode, 201);
   assert.strictEqual(recovered.body.stripe_session_id, "cs_test_42");
@@ -356,6 +371,89 @@ async function testStripeFailureUsesIdempotentRecovery() {
   assert.strictEqual(broadcasts, 1);
 }
 
+async function testStripePrunedKeyRequiresManualReconciliation() {
+  const db = createManualChargeDb({ failedUpdates: 1 });
+  const stripe = createFakeStripe();
+  let broadcasts = 0;
+  const handlers = registerManualChargeRoute({
+    db,
+    mockPayments: false,
+    stripe,
+    broadcast: () => {
+      broadcasts += 1;
+    },
+  });
+  const failed = createFakeResponse();
+  await dispatch(handlers, { body: { ...CHARGE } }, failed);
+  assert.strictEqual(failed.statusCode, 503);
+
+  db.rows.get(42).created_at = new Date(
+    Date.now() - 25 * 60 * 60 * 1000,
+  ).toISOString();
+  stripe.pruneIdempotencyKeys();
+
+  const retry = createFakeResponse();
+  await dispatch(handlers, { body: { ...CHARGE } }, retry);
+  assert.strictEqual(retry.statusCode, 409);
+  assert.strictEqual(
+    retry.body.code,
+    "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+  );
+  assert.deepStrictEqual(retry.body.recovery, { charge_id: 42 });
+  assert.strictEqual(db.insertCount, 1);
+  assert.strictEqual(stripe.createCalls.length, 1);
+  assert.strictEqual(
+    stripe.createdSessions.length,
+    1,
+    "an expired idempotency boundary must not issue another Stripe create",
+  );
+  assert.strictEqual(db.rows.get(42).stripe_session_id, null);
+  assert.strictEqual(broadcasts, 0);
+}
+
+async function testStripeSessionValidationFailsClosed() {
+  const cases = [
+    ["missing amount", (session) => ({ ...session, amount_total: undefined })],
+    ["wrong amount", (session) => ({ ...session, amount_total: 1 })],
+    ["missing currency", (session) => ({ ...session, currency: undefined })],
+    ["wrong currency", (session) => ({ ...session, currency: "eur" })],
+    ["wrong mode", (session) => ({ ...session, mode: "setup" })],
+    [
+      "wrong metadata",
+      (session) => ({
+        ...session,
+        metadata: { ...session.metadata, charge_id: "999" },
+      }),
+    ],
+  ];
+
+  for (const [name, transformSession] of cases) {
+    const db = createManualChargeDb();
+    const stripe = createFakeStripe({ transformSession });
+    let broadcasts = 0;
+    const handlers = registerManualChargeRoute({
+      db,
+      mockPayments: false,
+      stripe,
+      broadcast: () => {
+        broadcasts += 1;
+      },
+    });
+    const res = createFakeResponse();
+    await dispatch(handlers, { body: { ...CHARGE } }, res);
+
+    assert.strictEqual(res.statusCode, 409, name);
+    assert.strictEqual(
+      res.body.code,
+      "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
+      name,
+    );
+    assert.strictEqual(db.updateCount, 0, name);
+    assert.strictEqual(db.rows.get(42).stripe_session_id, null, name);
+    assert.strictEqual(broadcasts, 0, name);
+  }
+}
+
 async function main() {
   const originalConsoleError = console.error;
   console.error = () => {};
@@ -364,12 +462,14 @@ async function main() {
     await testMockFailureRecoversExistingRow();
     await testStripeSuccessWaitsForPersistence();
     await testStripeFailureUsesIdempotentRecovery();
+    await testStripePrunedKeyRequiresManualReconciliation();
+    await testStripeSessionValidationFailsClosed();
   } finally {
     console.error = originalConsoleError;
   }
 
   console.log(
-    "PASS: manual-charge success, failure, ordering, and idempotent recovery",
+    "PASS: manual-charge ordering, retry recovery, pruning cutoff, and strict Stripe validation",
   );
 }
 

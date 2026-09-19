@@ -1,6 +1,9 @@
 const jwt = require("jsonwebtoken");
 const { get: getDb, run: runDb } = require("../db-promises");
 
+// Stripe may prune idempotency keys once they are at least 24 hours old.
+const STRIPE_IDEMPOTENCY_SAFE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 function manualChargeMatches(row, {
   guest_name,
   guest_email,
@@ -52,12 +55,7 @@ function manualChargeSessionParams({
 
 function validateStripeSession(session, chargeId, charge) {
   const metadata = session && session.metadata;
-  const amountMatches =
-    session &&
-    (session.amount_total == null ||
-      session.amount_total === Math.round(Number(charge.amount) * 100));
-  const currencyMatches =
-    session && (session.currency == null || session.currency === "usd");
+  const expectedAmount = Math.round(Number(charge.amount) * 100);
 
   if (
     !session ||
@@ -67,13 +65,31 @@ function validateStripeSession(session, chargeId, charge) {
     metadata.guest_name !== charge.guest_name ||
     metadata.guest_email !== charge.guest_email ||
     session.mode !== "payment" ||
-    !amountMatches ||
-    !currencyMatches
+    session.amount_total !== expectedAmount ||
+    session.currency !== "usd"
   ) {
     const error = new Error("Stripe session does not match the manual charge");
     error.statusCode = 409;
+    error.requiresManualReconciliation = true;
     throw error;
   }
+}
+
+function manualChargeCreatedAtMs(createdAt) {
+  if (typeof createdAt !== "string" || !createdAt.trim()) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(createdAt);
+  const normalized = hasTimezone
+    ? createdAt
+    : `${createdAt.replace(" ", "T")}Z`;
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function canRetryStripeCreate(existingCharge, now = Date.now()) {
+  const createdAt = manualChargeCreatedAtMs(existingCharge.created_at);
+  if (createdAt == null) return false;
+  const age = now - createdAt;
+  return age >= 0 && age < STRIPE_IDEMPOTENCY_SAFE_WINDOW_MS;
 }
 
 async function persistManualChargeSession(db, chargeId, sessionId) {
@@ -95,6 +111,14 @@ function manualChargeRecoveryBody(error, chargeId) {
   return {
     error,
     code: "MANUAL_CHARGE_RECOVERY_REQUIRED",
+    recovery: { charge_id: chargeId },
+  };
+}
+
+function manualChargeReconciliationBody(error, chargeId) {
+  return {
+    error,
+    code: "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED",
     recovery: { charge_id: chargeId },
   };
 }
@@ -218,28 +242,49 @@ function registerAdminRoutes(app, {
           `SELECT * FROM manual_charges WHERE id = ?`,
           [chargeId],
         );
-        if (!existingCharge) {
-          return res.status(404).json({ error: "Manual charge not found" });
-        }
-        if (!manualChargeMatches(existingCharge, charge)) {
-          return res.status(409).json({
-            error: "Recovery request does not match the existing manual charge",
-          });
-        }
-        if (existingCharge.status !== "pending") {
-          return res.status(409).json({
-            error: "Only pending manual charges can be recovered",
-          });
-        }
       } else {
-        const inserted = await runDb(
-          db,
-          `INSERT INTO manual_charges
-             (guest_name, guest_email, description, amount)
-           VALUES (?, ?, ?, ?)`,
-          [guest_name, guest_email, description, amount],
-        );
-        chargeId = inserted.lastID;
+        if (mockPayments || stripe) {
+          existingCharge = await getDb(
+            db,
+            `SELECT * FROM manual_charges
+             WHERE guest_name = ?
+               AND guest_email = ?
+               AND description = ?
+               AND amount = ?
+               AND status = 'pending'
+               AND stripe_session_id IS NULL
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1`,
+            [guest_name, guest_email, description, amount],
+          );
+        }
+
+        if (existingCharge) {
+          chargeId = existingCharge.id;
+        } else {
+          const inserted = await runDb(
+            db,
+            `INSERT INTO manual_charges
+               (guest_name, guest_email, description, amount)
+             VALUES (?, ?, ?, ?)`,
+            [guest_name, guest_email, description, amount],
+          );
+          chargeId = inserted.lastID;
+        }
+      }
+
+      if (recoveryChargeId != null && !existingCharge) {
+        return res.status(404).json({ error: "Manual charge not found" });
+      }
+      if (existingCharge && !manualChargeMatches(existingCharge, charge)) {
+        return res.status(409).json({
+          error: "Recovery request does not match the existing manual charge",
+        });
+      }
+      if (existingCharge && existingCharge.status !== "pending") {
+        return res.status(409).json({
+          error: "Only pending manual charges can be recovered",
+        });
       }
     } catch (dbErr) {
       return res.status(500).json({ error: dbErr.message });
@@ -259,12 +304,23 @@ function registerAdminRoutes(app, {
         sessionId = expectedSessionId;
         sessionUrl = `${domain}/success.html?charge_id=${chargeId}`;
       } else if (stripe) {
-        const session = sessionId != null
-          ? await stripe.checkout.sessions.retrieve(sessionId)
-          : await stripe.checkout.sessions.create(
-              manualChargeSessionParams({ chargeId, ...charge, domain }),
-              { idempotencyKey: `manual-charge-${chargeId}` },
+        let session;
+        if (sessionId != null) {
+          session = await stripe.checkout.sessions.retrieve(sessionId);
+        } else {
+          if (existingCharge && !canRetryStripeCreate(existingCharge)) {
+            return res.status(409).json(
+              manualChargeReconciliationBody(
+                "Automatic recovery is no longer safe; reconcile this charge in Stripe before continuing",
+                chargeId,
+              ),
             );
+          }
+          session = await stripe.checkout.sessions.create(
+            manualChargeSessionParams({ chargeId, ...charge, domain }),
+            { idempotencyKey: `manual-charge-${chargeId}` },
+          );
+        }
 
         validateStripeSession(session, chargeId, charge);
         sessionId = session.id;
@@ -279,11 +335,14 @@ function registerAdminRoutes(app, {
       }
     } catch (stripeErr) {
       console.error("Stripe error creating or recovering manual charge:", stripeErr);
+      if (stripeErr.requiresManualReconciliation) {
+        return res.status(409).json(
+          manualChargeReconciliationBody(stripeErr.message, chargeId),
+        );
+      }
       return res.status(stripeErr.statusCode || 502).json(
         manualChargeRecoveryBody(
-          stripeErr.statusCode === 409
-            ? stripeErr.message
-            : "Unable to create or recover the payment session; retry this existing charge",
+          "Unable to create or recover the payment session; retry this existing charge",
           chargeId,
         ),
       );
