@@ -53,8 +53,13 @@ async function createTestDb() {
      );
      CREATE TABLE manual_charges (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
+       guest_name TEXT NOT NULL,
+       guest_email TEXT NOT NULL,
+       description TEXT NOT NULL,
+       amount REAL NOT NULL,
        status TEXT DEFAULT 'pending',
        stripe_session_id TEXT,
+       request_id TEXT,
        paid_at TEXT
      );`,
   );
@@ -110,6 +115,62 @@ async function invoke({ db, event, broadcastAdminUpdate = () => {}, stripe }) {
     logger: { error() {} },
   });
   return res;
+}
+
+const KEYED_CHARGE = {
+  id: 73,
+  guestName: "Keyed Guest",
+  guestEmail: "keyed@example.test",
+  description: "Keyed manual charge",
+  amount: 125.5,
+  requestId: "11111111-1111-4111-8111-111111111111",
+  sessionId: "cs_keyed_73",
+};
+
+async function insertKeyedCharge(
+  db,
+  { stripeSessionId = null, status = "pending" } = {},
+) {
+  await run(
+    db,
+    `INSERT INTO manual_charges
+       (id, guest_name, guest_email, description, amount, status,
+        stripe_session_id, request_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      KEYED_CHARGE.id,
+      KEYED_CHARGE.guestName,
+      KEYED_CHARGE.guestEmail,
+      KEYED_CHARGE.description,
+      KEYED_CHARGE.amount,
+      status,
+      stripeSessionId,
+      KEYED_CHARGE.requestId,
+    ],
+  );
+}
+
+function keyedManualChargeEvent({ session = {}, metadata = {} } = {}) {
+  return {
+    type: "checkout.session.completed",
+    data: {
+      object: {
+        id: KEYED_CHARGE.sessionId,
+        payment_status: "paid",
+        amount_total: Math.round(KEYED_CHARGE.amount * 100),
+        currency: "usd",
+        mode: "payment",
+        ...session,
+        metadata: {
+          charge_id: String(KEYED_CHARGE.id),
+          request_id: KEYED_CHARGE.requestId,
+          guest_name: KEYED_CHARGE.guestName,
+          guest_email: KEYED_CHARGE.guestEmail,
+          ...metadata,
+        },
+      },
+    },
+  };
 }
 
 async function testBookingSuccessAndDuplicateIdempotency() {
@@ -191,8 +252,16 @@ async function testManualChargeSuccessAndDuplicateIdempotency() {
   const db = await createTestDb();
   await run(
     db,
-    `INSERT INTO manual_charges (id, status) VALUES (?, 'pending')`,
-    [42],
+    `INSERT INTO manual_charges
+       (id, guest_name, guest_email, description, amount, status)
+     VALUES (?, ?, ?, ?, ?, 'pending')`,
+    [
+      42,
+      "Legacy Guest",
+      "legacy@example.test",
+      "Legacy manual charge",
+      42,
+    ],
   );
 
   let broadcasts = 0;
@@ -233,6 +302,166 @@ async function testManualChargeSuccessAndDuplicateIdempotency() {
   assert.strictEqual(broadcasts, 1, "duplicate charge webhook rebroadcasted");
 
   await close(db);
+}
+
+async function testKeyedManualChargeRaceConvergence() {
+  const webhookFirstDb = await createTestDb();
+  await insertKeyedCharge(webhookFirstDb);
+  let webhookFirstBroadcasts = 0;
+  const event = keyedManualChargeEvent();
+
+  const webhookFirst = await invoke({
+    db: webhookFirstDb,
+    event,
+    broadcastAdminUpdate: () => webhookFirstBroadcasts++,
+  });
+  assert.strictEqual(webhookFirst.statusCode, 200);
+  assert.strictEqual(webhookFirstBroadcasts, 1);
+
+  // This is the guarded linkage write used by the admin route. If the webhook
+  // wins the race, writing the same session remains a successful convergence.
+  const routeLinkAfterWebhook = await run(
+    webhookFirstDb,
+    `UPDATE manual_charges
+     SET stripe_session_id = ?
+     WHERE id = ?
+       AND (stripe_session_id IS NULL OR stripe_session_id = ?)`,
+    [KEYED_CHARGE.sessionId, KEYED_CHARGE.id, KEYED_CHARGE.sessionId],
+  );
+  assert.strictEqual(routeLinkAfterWebhook.changes, 1);
+
+  const webhookFirstRow = await get(
+    webhookFirstDb,
+    `SELECT status, stripe_session_id, paid_at
+     FROM manual_charges WHERE id = ?`,
+    [KEYED_CHARGE.id],
+  );
+  assert.strictEqual(webhookFirstRow.status, "paid");
+  assert.strictEqual(
+    webhookFirstRow.stripe_session_id,
+    KEYED_CHARGE.sessionId,
+  );
+  assert.ok(webhookFirstRow.paid_at);
+
+  const duplicate = await invoke({
+    db: webhookFirstDb,
+    event,
+    broadcastAdminUpdate: () => webhookFirstBroadcasts++,
+  });
+  assert.strictEqual(duplicate.statusCode, 200);
+  assert.strictEqual(
+    webhookFirstBroadcasts,
+    1,
+    "duplicate keyed webhook should not rebroadcast",
+  );
+  await close(webhookFirstDb);
+
+  const routeFirstDb = await createTestDb();
+  await insertKeyedCharge(routeFirstDb, {
+    stripeSessionId: KEYED_CHARGE.sessionId,
+  });
+  let routeFirstBroadcasts = 0;
+  const routeFirst = await invoke({
+    db: routeFirstDb,
+    event,
+    broadcastAdminUpdate: () => routeFirstBroadcasts++,
+  });
+  assert.strictEqual(routeFirst.statusCode, 200);
+  const routeFirstRow = await get(
+    routeFirstDb,
+    `SELECT status, stripe_session_id, paid_at
+     FROM manual_charges WHERE id = ?`,
+    [KEYED_CHARGE.id],
+  );
+  assert.strictEqual(routeFirstRow.status, "paid");
+  assert.strictEqual(routeFirstRow.stripe_session_id, KEYED_CHARGE.sessionId);
+  assert.ok(routeFirstRow.paid_at);
+  assert.strictEqual(routeFirstBroadcasts, 1);
+  await close(routeFirstDb);
+}
+
+async function testKeyedManualChargeMismatchFailsBeforeMutation() {
+  const cases = [
+    {
+      name: "request ID",
+      event: keyedManualChargeEvent({
+        session: { id: "cs_poison_73" },
+        metadata: {
+          request_id: "22222222-2222-4222-8222-222222222222",
+        },
+      }),
+    },
+    {
+      name: "amount",
+      event: keyedManualChargeEvent({ session: { amount_total: 1 } }),
+    },
+    {
+      name: "currency",
+      event: keyedManualChargeEvent({ session: { currency: "eur" } }),
+    },
+    {
+      name: "mode",
+      event: keyedManualChargeEvent({ session: { mode: "setup" } }),
+    },
+    {
+      name: "guest name",
+      event: keyedManualChargeEvent({
+        metadata: { guest_name: "Different Guest" },
+      }),
+    },
+    {
+      name: "guest email",
+      event: keyedManualChargeEvent({
+        metadata: { guest_email: "different@example.test" },
+      }),
+    },
+    {
+      name: "charge ID",
+      event: keyedManualChargeEvent({ metadata: { charge_id: "999" } }),
+    },
+    {
+      name: "existing session linkage",
+      stripeSessionId: "cs_expected_73",
+      event: keyedManualChargeEvent({ session: { id: "cs_other_73" } }),
+    },
+  ];
+
+  for (const testCase of cases) {
+    const db = await createTestDb();
+    await insertKeyedCharge(db, {
+      stripeSessionId: testCase.stripeSessionId,
+    });
+    let broadcasts = 0;
+    const res = await invoke({
+      db,
+      event: testCase.event,
+      broadcastAdminUpdate: () => broadcasts++,
+    });
+
+    assert.strictEqual(res.statusCode, 500, testCase.name);
+    assert.deepStrictEqual(
+      res.body,
+      { error: "Webhook persistence failed" },
+      testCase.name,
+    );
+    const row = await get(
+      db,
+      `SELECT status, stripe_session_id, paid_at
+       FROM manual_charges WHERE id = ?`,
+      [KEYED_CHARGE.id],
+    );
+    assert.deepStrictEqual(
+      row,
+      {
+        status: "pending",
+        stripe_session_id: testCase.stripeSessionId || null,
+        paid_at: null,
+      },
+      testCase.name,
+    );
+    assert.strictEqual(broadcasts, 0, testCase.name);
+    await close(db);
+  }
 }
 
 async function testPersistenceFailureReturns5xx() {
@@ -310,6 +539,11 @@ async function testExpiredSessionAwaitsHoldRelease() {
   const tests = [
     ["booking success + duplicate idempotency", testBookingSuccessAndDuplicateIdempotency],
     ["manual charge success + duplicate idempotency", testManualChargeSuccessAndDuplicateIdempotency],
+    ["keyed manual-charge race convergence", testKeyedManualChargeRaceConvergence],
+    [
+      "keyed manual-charge mismatch fails before mutation",
+      testKeyedManualChargeMismatchFailsBeforeMutation,
+    ],
     ["persistence failure returns 5xx", testPersistenceFailureReturns5xx],
     ["invalid signature returns 400", testInvalidSignatureReturns400],
     ["expired session awaits hold release", testExpiredSessionAwaitsHoldRelease],
