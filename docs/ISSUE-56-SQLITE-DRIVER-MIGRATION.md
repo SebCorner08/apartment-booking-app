@@ -121,3 +121,23 @@ Accordingly:
 - Data implementation remains blocked until #14 confirms the current SQLite driver/runtime path actually deploys successfully;
 - after #14 reaches `VERIFIED`, AGT-DATA-001 may implement the maintained-driver migration on this same branch using the documented compatibility adapter, migration/rollback plan and test matrix;
 - do not use Issue #56 as a workaround for the still-unverified production release.
+
+
+## Production baseline verified — 2026-09-19
+
+The immediate runtime/deployment dependency is now satisfied.
+
+Render evidence on authoritative service `srv-daj8qnu7bikc73b4q070`:
+- `main@7bd3db74d83dfa5d3a07b67d5b00c0efbbff8fa7` deployed `live`;
+- current `main@d3f9169deab84f9bd133576dddd593f8e7ef3232` also deployed `live`;
+- Render used Node `22.23.2`;
+- actual build command was `npm ci && npm rebuild sqlite3 --build-from-source`;
+- npm audit reported 0 vulnerabilities;
+- source rebuild completed successfully;
+- startup connected to `/var/data/reservations.db` and the service became live.
+
+Therefore Issue #56 is no longer blocked on proving the existing sqlite3 runtime path.
+
+New sequencing constraint:
+- Data-owned P1 Issue #62 (manual-charge Stripe-session durability) takes priority over this P2 driver migration because it affects payment/persistence correctness.
+- After #62 reaches a stable reviewed state, AGT-DATA-001 may proceed with this migration on the same branch.
