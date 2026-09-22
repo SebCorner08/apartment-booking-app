@@ -467,6 +467,16 @@
           return response;
         }
 
+        // Escapa texto antes de meterlo en innerHTML (evita XSS almacenado)
+        function escapeHtml(value) {
+          return String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+        }
+
         function createRow(booking) {
           const tr = document.createElement("tr");
           const statusClass = `status-${booking.bookingStatus}`;
@@ -479,16 +489,6 @@
             booking.rental_type === "monthly"
               ? `<span style="background:#667eea;color:white;padding:2px 8px;border-radius:4px;font-size:11px;">Monthly</span>`
               : `<span style="background:#95a5a6;color:white;padding:2px 8px;border-radius:4px;font-size:11px;">Short Stay</span>`;
-
-          // Escapa texto antes de meterlo en innerHTML (evita XSS almacenado)
-          function escapeHtml(value) {
-            return String(value ?? "")
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#39;");
-          }
 
           tr.innerHTML = `
                 <td>${booking.id}</td>

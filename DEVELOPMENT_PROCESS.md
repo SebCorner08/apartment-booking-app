@@ -10,242 +10,159 @@ coordinator: AGT-LEAD-001
 
 ## Purpose
 
-GitHub is the canonical execution record for issues, branches, commits, PRs, reviews, merges, deployments, and verification.
+GitHub is the canonical execution record for issues, branches, commits, PRs, reviews, merges, deployments and verification.
 
-A chat instruction never skips a required gate. Evidence belongs to the exact issue, branch, and head SHA being evaluated.
+A chat instruction never silently skips scope, ownership, evidence or merge authorization. Evidence belongs to the exact issue, branch and head SHA being evaluated.
 
 ## Non-negotiable ownership rules
 
-1. The principal assistant is the Lead Integrator and permanent **Web Implementation Owner**.
-2. The principal assistant may implement approved frontend/browser/web-security work on issue branches, but may not replace the Data or independent QA specialists.
-3. `AGT-DATA-001` owns Database & Payments implementation.
-4. `AGT-QA-001` owns Testing & Architecture implementation and normally supplies independent QA.
-5. If `AGT-QA-001` is itself the implementation owner, the Lead assigns another qualified independent reviewer for `QA_CONFORM`.
-6. GitHub Copilot may provide an optional initial seed commit, but it is not the final implementation owner.
-7. The implementation owner must inspect/adopt/correct/replace seed work and take responsibility for the final branch head, tests, and `RESULT_SUBMITTED` evidence.
-8. After implementation and independent QA, Copilot reviews the exact candidate.
-9. Valid Copilot findings return to the implementation owner.
-10. **Raelvi (`raelvim`) gives the final technical review word on every code PR** against the exact final head SHA.
-11. **Only the Repository Owner can authorize merge to `main`.** Raelvi approval is technical approval, not merge authorization.
-12. No AI actor may merge, squash, rebase, fast-forward, force-update, or directly write implementation code to `main` without a separate Repository Owner instruction for that exact PR/change.
+1. The principal assistant is Lead Integrator and permanent Web Implementation Owner.
+2. `AGT-DATA-001` owns Database & Payments work unless the Repository Owner explicitly grants a named exception.
+3. `AGT-QA-001` owns Testing & Architecture implementation and provides independent QA when risk-based verification is requested.
+4. GitHub Copilot is reviewer-only and must never generate or modify implementation artifacts.
+5. The implementation owner must own the final branch head, tests/evidence and `RESULT_SUBMITTED`.
+6. **Raelvi (`raelvim`) gives the final technical review word on every code PR** against the exact final head SHA.
+7. **Only the Repository Owner can authorize merge to `main`.**
 
 ## Roles
 
 ### Repository Owner
-
-Final authority for merge authorization, production deployment authorization, destructive operations, secret changes, and irreversible migrations.
+Final authority for merge authorization, production deployment authorization, destructive operations, secret changes, irreversible migrations and process exceptions.
 
 ### AGT-LEAD-001 / Principal assistant
-
-Coordinates issues, assigns specialists, checks scope/branch identity, controls integration readiness, and owns frontend/browser/web-security implementation.
-
-As Web Implementation Owner, the principal assistant may modify active `public/` files, `netlify.toml`, and frontend-focused regression tests within accepted issue scope. It may also handle browser-side API routing, DOM/rendering, XSS/CSP, and browser-side admin session behavior.
-
-The principal assistant must hand off backend database/payment/persistence/server-architecture work to `AGT-DATA-001` and may not independently certify its own web changes as `QA_CONFORM`.
+Coordinates issues, checks scope/branch identity, controls integration readiness and owns frontend/browser/web-security implementation. May act in a specialist domain only under a specific Repository Owner exception.
 
 ### AGT-DATA-001 — Database & Payments
-
-Owns database, persistence, migration, payment, Stripe, and backend data-integrity implementation.
+Owns database, persistence, migration, payment, Stripe and backend data-integrity implementation.
 
 ### AGT-QA-001 — Testing & Architecture
-
-Owns test/CI/architecture implementation and performs independent QA when it is not the implementation owner.
+Owns test/CI/architecture implementation and performs independent QA when invoked by risk assessment or explicit request.
 
 ### GitHub Copilot
-
-Independent reviewer after implementation + QA. Optional seed commits are allowed but never establish final ownership.
+Reviewer-only after `RESULT_SUBMITTED`. Findings return to the implementation owner. Copilot must not implement fixes.
 
 ### Raelvi (`raelvim`)
+Final technical reviewer for code PRs after Copilot findings and any required independent QA/fixes are resolved.
 
-Final technical reviewer for code PRs after implementation, independent QA, Copilot review, and resolution/disposition of findings.
-
-## Canonical process chain
+## Mandatory process chain
 
 For code changes:
 
-`ISSUE_CREATED → ISSUE_ACCEPTED → IMPLEMENTATION_OWNER_ASSIGNED → BRANCH_CREATED → IMPLEMENTATION_IN_PROGRESS → RESULT_SUBMITTED → QA_CONFORM → COPILOT_REVIEWED → RAELVI_APPROVED → LEAD_APPROVED → OWNER_APPROVED → MERGE_AUTHORIZED → MERGED → DEPLOYMENT_DECIDED → DEPLOYED → VERIFIED → CLOSED`
+`ISSUE_CREATED → ISSUE_ACCEPTED → IMPLEMENTATION_OWNER_ASSIGNED → BRANCH_CREATED → IMPLEMENTATION_IN_PROGRESS → RESULT_SUBMITTED → COPILOT_REVIEWED → RAELVI_APPROVED → LEAD_APPROVED → OWNER_APPROVED → MERGE_AUTHORIZED → MERGED → DEPLOYMENT_DECIDED → DEPLOYED/NOT_REQUIRED → VERIFIED → CLOSED`
 
-For documentation-only or repository-only changes with no runtime effect, deployment may be recorded as `NOT_REQUIRED` before verification.
+`QA_CONFORM` is an **optional risk-based evidence state**, not a mandatory step on every PR.
 
-No state may be silently skipped.
+Independent QA should be invoked for higher-risk work such as:
+- production DB migrations or destructive data operations;
+- payment/Stripe semantic changes;
+- authentication/session/security changes;
+- broad architecture/refactor or CI/test-infrastructure changes;
+- unresolved failures or ambiguous behavior;
+- explicit request from Copilot, Raelvi, Lead or Repository Owner.
+
+When QA is invoked it must be independent of the implementation owner and tied to the exact SHA.
 
 ## State rules
 
 ### ISSUE_CREATED
-
-Requires a GitHub issue with problem, scope, acceptance criteria, and risk/priority when relevant.
+Requires a GitHub issue with problem, scope, acceptance criteria and risk/priority when relevant.
 
 ### ISSUE_ACCEPTED
-
-Lead confirms the issue is valid, scoped, non-duplicate, and testable.
+Lead confirms the issue is valid, scoped, non-duplicate and testable.
 
 ### IMPLEMENTATION_OWNER_ASSIGNED
-
-Lead records one implementation owner:
-
-- Principal/Web for frontend/browser/web-security work;
-- `AGT-DATA-001` for database/payment/persistence work;
-- `AGT-QA-001` for testing/architecture work;
-- another explicitly approved owner only when the Repository Owner or Lead records that exception.
-
-Copilot is never the final implementation owner.
+Lead records one owner. Specialist exceptions must be explicit and recorded.
 
 ### BRANCH_CREATED
-
-One accepted issue maps to one primary implementation branch. Normal name: `issue-<number>-<short-name>`. Record baseline SHA.
-
-A Copilot branch/commit may be referenced as seed material, but the authoritative implementation remains on the designated issue branch.
+One accepted issue maps to one primary implementation branch. Record baseline SHA.
 
 ### IMPLEMENTATION_IN_PROGRESS
-
-The implementation owner may modify only authorized scope, add/update tests, and produce evidence.
-
-For Web work, the principal assistant may implement directly under the authority defined in `BUILD_VERIFICATION.md`.
-
-For Data or QA domains, the principal assistant must not impersonate the specialist.
+Implementation owner modifies only authorized scope, adds/updates tests and produces evidence.
 
 ### RESULT_SUBMITTED
-
-**Actor: identified implementation owner.**
+Actor: identified implementation owner.
 
 Required evidence:
-- branch;
-- exact head SHA;
+- branch and exact head SHA;
 - files changed;
-- checks/tests actually run and results;
+- tests/checks actually run and results;
 - known limitations;
-- migration/rollback notes where applicable;
-- confirmation that any Copilot seed was inspected and adopted/corrected/replaced by the owner.
+- migration/rollback notes where applicable.
 
-For web issues, the principal assistant may submit `RESULT_SUBMITTED`.
+### QA_CONFORM — optional
+Actor: qualified independent reviewer.
 
-### QA_CONFORM
-
-**Actor: independent reviewer.**
-
-Normally `AGT-QA-001` performs QA. The QA actor must be independent of the implementation owner for the change being certified.
-
-QA verifies relevant tests/regressions, security/data/payment impact, CI when applicable, and absence of unrelated files. Failed or missing required checks return work to implementation.
-
-The principal assistant may not issue `QA_CONFORM` for its own Web implementation.
+Use only when risk-based policy or an explicit reviewer/owner request requires independent QA. Record `QA_CONFORM` or concrete findings on the exact SHA.
 
 ### COPILOT_REVIEWED
-
-Copilot reviews the exact candidate that already has independent QA. Findings are captured in the PR.
-
-Valid findings return to the implementation owner. Material fixes require renewed affected QA and a fresh Copilot review.
+Copilot reviews the exact submitted candidate as reviewer-only. Findings return to the implementation owner. Material fixes require fresh affected review and any required QA.
 
 ### RAELVI_APPROVED
-
-**Actor: Raelvi (`raelvim`).**
-
-Raelvi reviews the exact final head after implementation, independent QA, Copilot review, and resolution/disposition of findings.
-
-Any material change after Raelvi approval requires another final review.
+Raelvi reviews the exact final head after Copilot findings and any required QA/fixes are resolved. Any material change afterward requires a new final review.
 
 ### LEAD_APPROVED
-
-Lead confirms issue scope, current QA, Copilot review, Raelvi approval, dependencies, and merge readiness all refer to the same final head SHA.
+Lead confirms scope, owner evidence, relevant tests, Copilot disposition, any required QA and Raelvi approval all refer to the same final head.
 
 ### OWNER_APPROVED
-
-Repository Owner accepts the technical result for the exact PR/head. This is **not** permission to merge.
+Repository Owner accepts the technical result for the exact PR/head. This is not merge permission.
 
 ### MERGE_AUTHORIZED
+Actor: Repository Owner only.
 
-**Actor: Repository Owner only.**
-
-Requires a separate explicit instruction identifying the exact PR/change, for example:
-
-- “Merge PR #25 to main.”
-- “You may merge the Issue #17 PR to main now.”
-
-“Fix it,” “continue,” “approve,” “finish,” or authorization to implement/review do not count.
+Requires a separate explicit instruction identifying the exact PR/change, for example “Merge PR #33 to main.”
 
 ### MERGED
-
-Only after all required prior gates and explicit `MERGE_AUTHORIZED`. Confirm expected head SHA and correct base.
+Only after explicit `MERGE_AUTHORIZED`. Confirm expected head SHA and correct base.
 
 ### DEPLOYMENT_DECIDED
-
-Record `REQUIRED`, `NOT_REQUIRED`, or `BLOCKED`.
+Record `REQUIRED`, `NOT_REQUIRED` or `BLOCKED`.
 
 ### DEPLOYED
-
-When required, record deployed SHA, target environment, result, and migration/config result as applicable. Merge is not deployment proof.
+When required, record deployed SHA, target environment, result and migration/config result as applicable.
 
 ### VERIFIED
-
-Runtime changes are verified against the deployed version. Repository-only changes are verified against merged state and CI/review evidence.
+Runtime changes are verified against the deployed version. Repository-only changes are verified against merged state and relevant checks.
 
 ### CLOSED
-
-Only after acceptance criteria and required verification are complete and follow-ups are either unnecessary or tracked separately.
+Only after acceptance criteria and required verification are complete and follow-ups are tracked or unnecessary.
 
 ## Blocking conditions
 
-Forward progress stops for any of the following:
-
-- wrong issue/branch/SHA;
-- required Data or QA specialist unavailable;
-- principal assistant would need to impersonate a non-web specialist;
-- Copilot is being treated as final implementation owner;
-- implementation owner has not taken responsibility for Copilot seed work;
-- relevant tests fail or are misleading/no-op;
+Forward progress stops for:
+- wrong issue/branch/SHA or implementation owner;
+- unauthorized Copilot implementation activity;
+- relevant test failures;
 - unresolved security/payment/data/persistence risk;
-- missing migration/rollback plan for stateful/destructive changes;
-- implementation changed materially after QA/review without revalidation;
-- unresolved review comments;
-- missing independent QA;
-- missing Copilot review for a code PR;
+- missing migration/rollback plan for stateful/destructive work;
+- material code change after review without revalidation;
+- unresolved review findings;
+- missing risk-based QA when explicitly required;
+- missing Copilot review or explicit Repository Owner waiver;
 - missing Raelvi final technical approval;
 - merge conflicts/dependency conflicts;
 - missing explicit Repository Owner merge authorization;
-- deployment outcome unknown;
-- verification performed against a different version/environment.
-
-Evidence added after an unauthorized action does not retroactively authorize it.
-
-## Copilot seed handling
-
-When Copilot supplies an initial commit:
-
-1. Record the seed SHA.
-2. Do not treat Copilot as implementation owner.
-3. The designated implementation owner reviews the seed and decides what to adopt.
-4. Final implementation stays on the issue branch/PR.
-5. The implementation owner produces `RESULT_SUBMITTED` evidence.
-6. Independent QA checks the final head.
-7. Copilot then returns only as reviewer.
+- unknown deployment outcome when deployment is required.
 
 ## Review order
 
-For web PRs:
+Normal code PR:
 
-`Principal/Web implementation → independent QA → Copilot review → Principal/Web addresses findings → Raelvi final technical review → Lead readiness → Owner approval → explicit MERGE_AUTHORIZED`
+`Implementation + owner tests/evidence → Copilot review → implementation owner addresses findings → optional risk-based QA if required → Raelvi final technical review → Lead readiness → Owner approval → explicit MERGE_AUTHORIZED`
 
-For specialist PRs:
-
-`Specialist implementation → independent QA → Copilot review → implementation owner addresses findings → Raelvi final technical review → Lead readiness → Owner approval → explicit MERGE_AUTHORIZED`
-
-Review evidence is SHA-specific. A material change after review invalidates the affected review.
+Risk-based QA may also be run before Copilot if the Lead/owner chooses. The final head must have all required evidence and reviews current at the time of Raelvi approval.
 
 ## Recovery
 
 ### QA or review failed
+Return to `IMPLEMENTATION_IN_PROGRESS`, preserve failed evidence, fix on the issue branch and repeat affected checks/reviews.
 
-Return to `IMPLEMENTATION_IN_PROGRESS`, preserve failed evidence in history, fix on the issue branch, rerun checks, and repeat affected review gates.
-
-### Copilot accidentally became implementation owner
-
-Stop. Preserve useful commits only as seed evidence. Move implementation responsibility back to the designated owner and require a new owner-submitted candidate before review gates resume.
+### Unauthorized Copilot implementation artifact
+Stop. Do not adopt, copy, cherry-pick or merge it without an explicit Repository Owner exception naming the artifact and permitted use.
 
 ### Unauthorized merge
-
-Stop immediately. Record the deviation. Do not write directly to `main` to repair it. Prepare a separate rollback PR and wait for explicit owner merge authorization.
+Stop immediately. Record the deviation. Do not write directly to `main` to repair it. Prepare a separate rollback/recovery PR and wait for owner disposition.
 
 ### Deployment outcome unknown
-
 Do not redeploy blindly. Reconcile the deployment platform first.
 
 ## Canonical evidence format
@@ -254,23 +171,14 @@ Do not redeploy blindly. Reconcile the deployment platform first.
 PROCESS_STATE
 issue: #<number>
 state: <STATE>
-actor: <Principal/Web | AGT-DATA-001 | AGT-QA-001 | reviewer | owner>
+actor: <implementation owner | reviewer | owner>
 branch: <branch>
 head_sha: <sha>
-evidence:
-  tests: <result or link>
-  qa: <result or N/A>
-  copilot_review: <result or N/A>
-  raelvi_review: <result or N/A>
-  deployment: <result or N/A>
-blockers: none | <blockers>
+evidence: <tests/reviews/checks>
+qa: <NOT_REQUIRED | REQUIRED | QA_CONFORM | findings>
+next_action: <action>
 ```
 
-## Current issue routing
+## Completion
 
-- Principal/Web Implementation Owner: #3, #4, #6, #17.
-- `AGT-DATA-001`: #1, #2, #5.
-- `AGT-QA-001`: #7, #8, #9, #15.
-- Lead Integrator / principal assistant: #14, #16, coordination, integration, deployment decisions, and release readiness.
-
-Routing changes require a recorded Lead/Owner decision.
+A code task is complete only when the final implementation is owned, relevant tests/evidence are recorded, Copilot review is complete or explicitly waived by the Repository Owner, any required risk-based QA is complete, Raelvi has approved the exact final head, merge was explicitly authorized and post-merge/deployment verification is complete when applicable.

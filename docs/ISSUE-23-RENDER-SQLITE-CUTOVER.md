@@ -10,7 +10,7 @@ The active service is `escapelakenorman-api` at `https://escapelakenorman-api-l2
 
 ## Application behavior
 
-- Without `RESERVATIONS_DB_PATH`, the app keeps the existing local-development/runtime fallback: `server/reservations.db`.
+- Outside production, without `RESERVATIONS_DB_PATH`, the app keeps the local-development fallback: `server/reservations.db`. Production requires an explicit path.
 - `DATABASE_PATH` is accepted only as a compatibility alias.
 - After the cutover, production must use `RESERVATIONS_DB_PATH=/var/data/reservations.db`.
 - `RESERVATIONS_DB_PATH` is intentionally omitted from `render.yaml`. It is a manually owned Render environment variable so a future Blueprint sync cannot overwrite the production cutover value.
@@ -65,8 +65,8 @@ Keep the verified off-service pre-cutover backup until the persistence verificat
 If the persistent database cannot be opened or validation fails:
 
 1. Stop accepting the cutover as successful; do not delete either copy.
-2. Clear `RESERVATIONS_DB_PATH` so the reviewed application can fall back to `server/reservations.db` only if an intact database is restored there first.
-3. Restore the verified off-service backup to the chosen rollback location.
+2. Choose and record an explicit rollback database path on durable storage. Do not clear `RESERVATIONS_DB_PATH`, because the reviewed application intentionally refuses an implicit production fallback.
+3. Restore the verified off-service backup to that rollback location and set `RESERVATIONS_DB_PATH` to its exact path.
 4. Restart the service and verify integrity/counts before resuming booking traffic.
 5. Do not roll back to an older application revision that ignores `RESERVATIONS_DB_PATH` unless the database location for that revision has also been explicitly restored and verified.
 

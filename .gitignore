@@ -3,6 +3,7 @@ node_modules/
 
 # Archivos de base de datos (para no subir la de prueba)
 server/reservations.db
+server/reservations.db-*
 
 # Archivos de sistema operativo
 .DS_Store

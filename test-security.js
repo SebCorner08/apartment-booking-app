@@ -1,7 +1,12 @@
 // Pruebas de seguridad de la API (contra MOCK_PAYMENTS, servidor en :3001)
 // Uso: node test-security.js
+const path = require("path");
+require("dotenv").config({
+  path: path.join(__dirname, "server", ".env"),
+  override: false,
+});
 const API = "http://localhost:3001";
-const fs = require("fs");
+const API_URL = process.env.TEST_API_URL || API;
 
 let passed = 0;
 let failed = 0;
@@ -17,7 +22,7 @@ function check(name, cond, detail = "") {
 }
 
 async function req(method, p, body, headers = {}) {
-  const r = await fetch(`${API}${p}`, {
+  const r = await fetch(`${API_URL}${p}`, {
     method,
     headers: {
       "Content-Type": "application/json",
@@ -33,8 +38,10 @@ async function req(method, p, body, headers = {}) {
 }
 
 (async () => {
-  const env = fs.readFileSync("server/.env", "utf8");
-  const ADMIN_PASSWORD = env.match(/^ADMIN_PASSWORD=(.*)$/m)[1].trim();
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+  if (!ADMIN_PASSWORD) {
+    throw new Error("ADMIN_PASSWORD is required for the integration test");
+  }
 
   console.log("\n[Autenticación y autorización]");
   let r = await req("GET", "/api/admin/bookings");

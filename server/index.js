@@ -766,89 +766,21 @@ app.post("/api/bookings", async (req, res) => {
 /**
  * Maneja los eventos de Stripe verificando la firma del webhook.
  * Esta es la vía confiable para confirmar reservas (no depende del navegador del cliente).
+ * Issue #2: delega la persistencia a un handler awaitable para no devolver 2xx
+ * hasta que las escrituras requeridas hayan terminado correctamente.
  */
-function handleStripeWebhook(req, res) {
-  if (!STRIPE_WEBHOOK_SECRET) {
-    console.error(
-      "STRIPE_WEBHOOK_SECRET no configurado; el webhook no puede verificarse.",
-    );
-    return res.status(500).send("Webhook not configured");
-  }
-
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      req.headers["stripe-signature"],
-      STRIPE_WEBHOOK_SECRET,
-    );
-  } catch (err) {
-    console.error("Firma de webhook de Stripe inválida:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    const { checkIn, checkOut, charge_id, hold_id } = session.metadata || {};
-
-    // Cobro manual
-    if (charge_id && session.payment_status === "paid") {
-      db.run(
-        `UPDATE manual_charges SET status = 'paid', paid_at = datetime('now') WHERE id = ?`,
-        [charge_id],
-        function (err) {
-          if (err) {
-            console.error("Error marking manual charge as paid:", err.message);
-            return;
-          }
-          if (this.changes > 0) {
-            console.log(`✅ Cobro manual #${charge_id} confirmado vía webhook`);
-            broadcastAdminUpdate();
-          }
-        },
-      );
-    }
-
-    // Reserva de alojamiento
-    if (checkIn && checkOut && session.payment_status === "paid") {
-      const rentalType = session.metadata?.rental_type || "short_stay";
-      const guests = parseInt(session.metadata?.guests, 10) || 2;
-      const sql = `INSERT OR IGNORE INTO bookings (checkIn, checkOut, bookingStatus, stripePaymentId, rental_type, guests) VALUES (?, ?, 'confirmed', ?, ?, ?)`;
-      db.run(
-        sql,
-        [checkIn, checkOut, session.id, rentalType, guests],
-        function (err) {
-          if (err) {
-            console.error(
-              "Error guardando reserva desde el webhook:",
-              err.message,
-            );
-            return;
-          }
-          if (this.changes > 0) {
-            console.log(
-              `✅ Reserva confirmada vía webhook: ${checkIn} → ${checkOut}`,
-            );
-            broadcastAdminUpdate();
-          }
-        },
-      );
-      confirmHold(hold_id, session.id);
-    }
-  }
-
-  // Pago expirado o fallido: liberar el bloqueo temporal de las fechas
-  if (
-    event.type === "checkout.session.expired" ||
-    event.type === "checkout.session.async_payment_failed"
-  ) {
-    const session = event.data.object;
-    if (session.metadata?.hold_id) releaseHold(session.metadata.hold_id);
-    releaseHoldBySession(session.id);
-    console.log(`🔓 Bloqueo liberado por pago expirado/fallido: ${session.id}`);
-  }
-
-  res.json({ received: true });
+async function handleStripeWebhook(req, res) {
+  const {
+    handleStripeWebhookRequest,
+  } = require("./stripe-webhook-persistence");
+  return handleStripeWebhookRequest({
+    req,
+    res,
+    stripe,
+    db,
+    webhookSecret: STRIPE_WEBHOOK_SECRET,
+    broadcastAdminUpdate,
+  });
 }
 
 // ============ ADMIN ENDPOINTS ============
@@ -1302,27 +1234,42 @@ function broadcastAdminUpdate() {
   });
 }
 
-server.listen(PORT, () => {
-  console.log(`\n${"=".repeat(50)}`);
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📍 Environment: ${NODE_ENV}`);
-  console.log(`🌐 Domain: ${DOMAIN}`);
-  console.log(`📅 Calendar URL: ${DOMAIN}/api/calendar.ics`);
-  console.log(`${"=".repeat(50)}\n`);
+function startServer() {
+  server.listen(PORT, () => {
+    const listeningPort = server.address().port;
+    console.log(`\n${"=".repeat(50)}`);
+    console.log(`🚀 Server running on port ${listeningPort}`);
+    console.log(`📍 Environment: ${NODE_ENV}`);
+    console.log(`🌐 Domain: ${DOMAIN}`);
+    console.log(`📅 Calendar URL: ${DOMAIN}/api/calendar.ics`);
+    console.log(`${"=".repeat(50)}\n`);
 
-  // Limpieza periódica de bloqueos temporales de pagos abandonados.
-  // La primera ejecución espera un poco para que database.js termine de crear las tablas.
-  setTimeout(cleanupExpiredHolds, 2000);
-  setInterval(cleanupExpiredHolds, 5 * 60 * 1000);
+    // Limpieza periódica de bloqueos temporales de pagos abandonados.
+    // La primera ejecución espera un poco para que database.js termine de crear las tablas.
+    setTimeout(cleanupExpiredHolds, 2000);
+    setInterval(cleanupExpiredHolds, 5 * 60 * 1000);
 
-  if (AIRBNB_ICAL_URL) {
-    syncAirbnbCalendar();
-    setInterval(syncAirbnbCalendar, 15 * 60 * 1000); // cada hora
-  } else {
-    console.log(
-      "ℹ️ AIRBNB_ICAL_URL no configurado: sincronización con Airbnb desactivada.",
-    );
-  }
+    if (AIRBNB_ICAL_URL) {
+      syncAirbnbCalendar();
+      setInterval(syncAirbnbCalendar, 15 * 60 * 1000); // cada hora
+    } else {
+      console.log(
+        "ℹ️ AIRBNB_ICAL_URL no configurado: sincronización con Airbnb desactivada.",
+      );
+    }
+    if (typeof process.send === "function") {
+      process.send({ type: "server-listening", port: listeningPort });
+    }
+  });
+}
+
+db.ready.then(startServer).catch((err) => {
+  console.error(
+    "❌ Database bootstrap failed; server will not start:",
+    err.message,
+  );
+  process.exitCode = 1;
+  db.close(() => {});
 });
 
 module.exports = { app };
