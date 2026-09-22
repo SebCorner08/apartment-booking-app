@@ -490,11 +490,40 @@ try {
     bootstrapEnv,
   );
 
+  runNode(
+    `
+      const db = require(${databaseModule});
+      db.ready.then(() => {
+        db.all("PRAGMA table_info(manual_charges)", (columnErr, columns) => {
+          if (columnErr) throw columnErr;
+          if (!columns.some((column) => column.name === "request_id")) {
+            throw new Error("Fresh manual_charges schema is missing request_id");
+          }
+          db.get(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_manual_charges_request_id'",
+            (indexErr, indexRow) => {
+              if (indexErr) throw indexErr;
+              if (!indexRow) {
+                throw new Error("Fresh manual_charges request index is missing");
+              }
+              db.close((closeErr) => {
+                if (closeErr) throw closeErr;
+              });
+            },
+          );
+        });
+      });
+    `,
+    bootstrapEnv,
+  );
+
   const legacyEnv = {
     ...process.env,
     RESERVATIONS_DB_PATH: populatedLegacyPath,
     TAX_MECKLENBURG_SALES: "9.9",
     TAX_MECKLENBURG_OCCUPANCY: "8.8",
+    CLEANING_FEE: "135",
+    MINIMUM_NIGHTS: "14",
   };
   delete legacyEnv.DATABASE_PATH;
 
@@ -525,6 +554,21 @@ try {
         db.run(
           "INSERT INTO tax_settings (id, nc_state, mecklenburg_local, occupancy, updated_at) VALUES (?, ?, ?, ?, ?)",
           [17, 4.75, 2.25, 6.5, "2024-01-02 03:04:05"]
+        );
+        db.run(\`CREATE TABLE manual_charges (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          guest_name TEXT NOT NULL,
+          guest_email TEXT NOT NULL,
+          description TEXT NOT NULL,
+          amount REAL NOT NULL,
+          status TEXT DEFAULT 'pending',
+          stripe_session_id TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          paid_at TEXT
+        )\`);
+        db.run(
+          "INSERT INTO manual_charges (id, guest_name, guest_email, description, amount, status) VALUES (?, ?, ?, ?, ?, ?)",
+          [29, "Legacy Guest", "legacy@example.test", "Legacy deposit", 88, "pending"]
         );
       });
       db.close((err) => {
@@ -568,16 +612,33 @@ try {
                   tax.monthly_rate !== 1800 || tax.nightly_rate !== 150) {
                 throw new Error("Legacy tax compatibility columns were not added");
               }
-              db.get(
-                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_bookings_stripe_payment_id'",
-                (indexErr, indexRow) => {
-                  if (indexErr) throw indexErr;
-                  if (!indexRow) throw new Error("Legacy database unique index was not created");
-                  db.close((closeErr) => {
-                    if (closeErr) throw closeErr;
-                  });
-                },
-              );
+              if (tax.cleaning_fee !== 135 || tax.minimum_nights !== 14) {
+                throw new Error("Legacy pricing columns did not preserve configured bootstrap values");
+              }
+              db.get("SELECT * FROM manual_charges WHERE id = 29", (chargeErr, charge) => {
+                if (chargeErr) throw chargeErr;
+                if (!charge || charge.guest_name !== "Legacy Guest" ||
+                    charge.guest_email !== "legacy@example.test" ||
+                    charge.description !== "Legacy deposit" ||
+                    charge.amount !== 88 || charge.status !== "pending" ||
+                    charge.request_id !== null) {
+                  throw new Error("Legacy manual charge was not preserved as unkeyed");
+                }
+                db.all(
+                  "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('idx_bookings_stripe_payment_id', 'idx_manual_charges_request_id')",
+                  (indexErr, indexes) => {
+                    if (indexErr) throw indexErr;
+                    const names = new Set(indexes.map((index) => index.name));
+                    if (!names.has("idx_bookings_stripe_payment_id") ||
+                        !names.has("idx_manual_charges_request_id")) {
+                      throw new Error("Legacy database unique indexes were not created");
+                    }
+                    db.close((closeErr) => {
+                      if (closeErr) throw closeErr;
+                    });
+                  },
+                );
+              });
             });
           });
         });

@@ -12,8 +12,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .node-version
           cache: npm
+      - name: Verify manifest and lockfile runtime metadata
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const lock = require('./package-lock.json');
+          const manifestNode = pkg.engines?.node;
+          const lockfileNode = lock.packages?.['']?.engines?.node;
+
+          if (typeof manifestNode !== 'string' || typeof lockfileNode !== 'string') {
+            console.error('Missing engines.node metadata', {
+              packageJson: manifestNode ?? '<missing>',
+              packageLock: lockfileNode ?? '<missing>',
+            });
+            process.exit(1);
+          }
+
+          if (manifestNode !== lockfileNode) {
+            console.error('engines.node metadata differs', {
+              packageJson: manifestNode,
+              packageLock: lockfileNode,
+            });
+            process.exit(1);
+          }
+          NODE
       - run: npm ci
+      - name: Rebuild sqlite3 from source
+        run: npm rebuild sqlite3 --build-from-source
+      - name: Verify sqlite3 native load
+        run: node -e "require('sqlite3'); console.log('sqlite3 native load ok')"
+      - name: Audit production dependencies
+        run: npm audit --audit-level=high
       - name: Run test suite
         run: npm test

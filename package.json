@@ -6,10 +6,13 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node server/index.js",
-    "test": "node test-repository-data-hygiene.js && node test-database-path.js && node test-stripe-webhook-durability.js && node test-runner.js",
+    "test:admin-session": "node test-admin-session-browser.js",
+    "test": "node test-repository-data-hygiene.js && node test-database-path.js && node test-stripe-webhook-durability.js && node test-pricing-settings.js && node test-booking-minimum-source.js && node test-backend-modules.js && node test-manual-charge-durability.js && node test-manual-charge-admin-retry.js && node test-manual-charge-admin-retry-behavior.js && node test-runner.js",
     "test:persistence": "node test-database-path.js",
-    "test:booking": "node test-booking-flow.js",
     "test:webhook": "node test-stripe-webhook-durability.js",
+    "test:booking-minimum": "node test-booking-minimum-source.js",
+    "test:pricing": "node test-pricing-settings.js",
+    "test:booking": "node test-booking-flow.js",
     "test:data-hygiene": "node test-repository-data-hygiene.js"
   },
   "keywords": [],

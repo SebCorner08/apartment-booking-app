@@ -261,6 +261,9 @@
         <a href="tax-settings.html" class="btn-tax-settings">
           <i class="fas fa-cog"></i> Configure Tax Rates
         </a>
+        <button type="button" id="btn-logout" class="btn-tax-settings">
+          <i class="fas fa-sign-out-alt"></i> Logout
+        </button>
       </div>
 
       <div class="bookings-section">
@@ -390,23 +393,17 @@
     </div>
 
     <script>
-      // El frontend (Netlify) y el backend viven en dominios distintos.
-      // TODO: reemplazar por la URL real una vez desplegado el backend (Render/Railway/etc).
-      const PROD_API_URL = "https://escapelakenorman-api-l2da.onrender.com";
-      const API_URL = ["localhost", "127.0.0.1"].includes(
+      const PROD_WS_URL = "https://escapelakenorman-api-l2da.onrender.com";
+      const IS_LOCAL = ["localhost", "127.0.0.1"].includes(
         window.location.hostname,
-      )
+      );
+      const API_URL = IS_LOCAL
         ? `http://${window.location.hostname}:3001`
-        : PROD_API_URL;
+        : "";
+      const WS_API_URL = IS_LOCAL ? API_URL : PROD_WS_URL;
 
       document.addEventListener("DOMContentLoaded", () => {
         // --- VERIFICACIÓN Y REFERENCIAS ---
-        const token = localStorage.getItem("admin_token");
-        if (!token) {
-          window.location.href = "login.html";
-          return;
-        }
-
         const activeTbody = document.getElementById("active-bookings-tbody");
         const pastTbody = document.getElementById("past-bookings-tbody");
         const noActiveMsg = document.getElementById("no-active-bookings");
@@ -414,14 +411,40 @@
 
         // --- WEBSOCKET ---
         const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-        const wsUrl = `${wsProtocol}://${API_URL.replace(/^https?:\/\//, "")}`;
+        const wsUrl = `${wsProtocol}://${WS_API_URL.replace(/^https?:\/\//, "")}/admin-updates`;
         let socket = null;
+        let allowWebSocketReconnect = true;
 
-        function connectWebSocket() {
+        function scheduleWebSocketReconnect() {
+          if (allowWebSocketReconnect) {
+            setTimeout(connectWebSocket, 3000);
+          }
+        }
+
+        async function connectWebSocket() {
           try {
-            socket = new WebSocket(wsUrl);
+            const ticketResponse = await fetchWithAuth(
+              `${API_URL}/api/admin/websocket-ticket`,
+              { method: "POST" },
+            );
+            if (!ticketResponse.ok) {
+              throw new Error(
+                `WebSocket ticket failed with status ${ticketResponse.status}`,
+              );
+            }
 
-            socket.addEventListener("message", (event) => {
+            const { ticket } = await ticketResponse.json();
+            if (!ticket) {
+              throw new Error("WebSocket ticket response is invalid.");
+            }
+
+            const nextSocket = new WebSocket(wsUrl, [
+              "admin-updates",
+              `admin-ticket.${ticket}`,
+            ]);
+            socket = nextSocket;
+
+            nextSocket.addEventListener("message", (event) => {
               const message = JSON.parse(event.data);
               if (message.type === "bookings_updated") {
                 console.log(
@@ -431,23 +454,24 @@
               }
             });
 
-            socket.addEventListener("open", () => {
+            nextSocket.addEventListener("open", () => {
               console.log("WebSocket connection established.");
             });
 
-            socket.addEventListener("close", () => {
+            nextSocket.addEventListener("close", () => {
+              if (socket === nextSocket) socket = null;
               console.log(
                 "WebSocket connection closed. Attempting to reconnect...",
               );
-              setTimeout(connectWebSocket, 3000);
+              scheduleWebSocketReconnect();
             });
 
-            socket.addEventListener("error", (error) => {
+            nextSocket.addEventListener("error", (error) => {
               console.error("WebSocket error:", error);
             });
           } catch (error) {
             console.error("WebSocket connection error:", error);
-            setTimeout(connectWebSocket, 3000);
+            if (!error.isAuthFailure) scheduleWebSocketReconnect();
           }
         }
 
@@ -455,14 +479,18 @@
         async function fetchWithAuth(url, options = {}) {
           const headers = {
             ...options.headers,
-            Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
           };
-          const response = await fetch(url, { ...options, headers });
+          const response = await fetch(url, {
+            ...options,
+            headers,
+            credentials: "include",
+          });
           if (response.status === 401 || response.status === 403) {
-            localStorage.removeItem("admin_token");
             window.location.href = "login.html";
-            throw new Error("Session expired or invalid.");
+            const error = new Error("Session expired or invalid.");
+            error.isAuthFailure = true;
+            throw error;
           }
           return response;
         }
@@ -476,6 +504,28 @@
             .replace(/"/g, "&quot;")
             .replace(/'/g, "&#39;");
         }
+
+        document
+          .getElementById("btn-logout")
+          .addEventListener("click", async () => {
+            try {
+              const response = await fetch(`${API_URL}/api/admin/logout`, {
+                method: "POST",
+                credentials: "include",
+              });
+              if (!response.ok) {
+                throw new Error(`Logout failed with status ${response.status}`);
+              }
+              allowWebSocketReconnect = false;
+              if (socket) socket.close();
+              window.location.href = "login.html";
+            } catch (error) {
+              console.error("Logout failed:", error);
+              window.alert(
+                "Logout failed. Your session may still be active. Please try again.",
+              );
+            }
+          });
 
         function createRow(booking) {
           const tr = document.createElement("tr");
@@ -598,6 +648,142 @@
         const billingMessage = document.getElementById("billing-message");
         const chargesTbody = document.getElementById("charges-tbody");
         const noChargesMsg = document.getElementById("no-charges");
+        const sendInvoiceButton = document.getElementById("btn-send-invoice");
+        const billingInputs = [
+          "billing-name",
+          "billing-email",
+          "billing-desc",
+          "billing-amount",
+        ].map((id) => document.getElementById(id));
+        const manualChargeStorageKey = "pending-manual-charge-v1";
+        const manualChargeRequestIdPattern =
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+        let pendingManualChargeRequest = null;
+        let manualChargeStorageError = null;
+
+        function createManualChargeRequestId() {
+          if (typeof window.crypto.randomUUID === "function") {
+            return window.crypto.randomUUID();
+          }
+
+          const bytes = new Uint8Array(16);
+          window.crypto.getRandomValues(bytes);
+          bytes[6] = (bytes[6] & 0x0f) | 0x40;
+          bytes[8] = (bytes[8] & 0x3f) | 0x80;
+          const hex = Array.from(bytes, (byte) =>
+            byte.toString(16).padStart(2, "0"),
+          ).join("");
+          return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+        }
+
+        function readManualChargeFields() {
+          return {
+            name: document.getElementById("billing-name").value.trim(),
+            email: document.getElementById("billing-email").value.trim(),
+            desc: document.getElementById("billing-desc").value.trim(),
+            amount: parseFloat(
+              document.getElementById("billing-amount").value,
+            ),
+          };
+        }
+
+        function persistPendingManualChargeRequest(request) {
+          try {
+            window.sessionStorage.setItem(
+              manualChargeStorageKey,
+              JSON.stringify(request),
+            );
+            return true;
+          } catch (error) {
+            manualChargeStorageError =
+              "This browser cannot safely retain a pending payment request. Enable session storage or use another browser.";
+            return false;
+          }
+        }
+
+        function clearPendingManualChargeRequest() {
+          pendingManualChargeRequest = null;
+          try {
+            window.sessionStorage.removeItem(manualChargeStorageKey);
+            manualChargeStorageError = null;
+            return true;
+          } catch (error) {
+            manualChargeStorageError =
+              "This browser could not clear the saved payment request. Reconcile it before starting another charge.";
+            return false;
+          }
+        }
+
+        function clearResolvedManualChargeRequest(chargeId) {
+          const numericChargeId = Number(chargeId);
+          if (
+            !pendingManualChargeRequest ||
+            !Number.isSafeInteger(numericChargeId) ||
+            pendingManualChargeRequest.recoveryChargeId !== numericChargeId
+          ) {
+            return true;
+          }
+
+          return clearPendingManualChargeRequest();
+        }
+
+        function restorePendingManualChargeRequest() {
+          let serialized;
+          try {
+            serialized = window.sessionStorage.getItem(manualChargeStorageKey);
+          } catch (error) {
+            manualChargeStorageError =
+              "This browser cannot safely retain a pending payment request. Enable session storage or use another browser.";
+            return;
+          }
+          if (!serialized) return;
+
+          try {
+            const stored = JSON.parse(serialized);
+            const fields = stored.fields;
+            const validFields =
+              fields &&
+              typeof fields.name === "string" &&
+              fields.name.length > 0 &&
+              typeof fields.email === "string" &&
+              fields.email.length > 0 &&
+              typeof fields.desc === "string" &&
+              fields.desc.length > 0 &&
+              Number.isFinite(fields.amount) &&
+              fields.amount > 0;
+            const validRecoveryId =
+              stored.recoveryChargeId == null ||
+              (Number.isSafeInteger(stored.recoveryChargeId) &&
+                stored.recoveryChargeId > 0);
+
+            if (
+              !manualChargeRequestIdPattern.test(stored.requestId) ||
+              !validFields ||
+              !validRecoveryId ||
+              stored.signature !== JSON.stringify(fields)
+            ) {
+              throw new Error("Invalid pending manual-charge state");
+            }
+
+            pendingManualChargeRequest = stored;
+            document.getElementById("billing-name").value = fields.name;
+            document.getElementById("billing-email").value = fields.email;
+            document.getElementById("billing-desc").value = fields.desc;
+            document.getElementById("billing-amount").value = String(
+              fields.amount,
+            );
+          } catch (error) {
+            manualChargeStorageError =
+              "A saved payment request could not be verified. Reconcile it before starting another charge.";
+          }
+        }
+
+        function setManualChargeFormBusy(isBusy) {
+          sendInvoiceButton.disabled = isBusy;
+          billingInputs.forEach((input) => {
+            input.disabled = isBusy;
+          });
+        }
 
         function showBillingMessage(text, type = "success") {
           billingMessage.textContent = text;
@@ -605,6 +791,26 @@
           setTimeout(() => {
             billingMessage.className = "billing-message";
           }, 5000);
+        }
+
+        restorePendingManualChargeRequest();
+        billingInputs.forEach((input) => {
+          input.addEventListener("input", () => {
+            const fieldsChanged =
+              pendingManualChargeRequest &&
+              JSON.stringify(readManualChargeFields()) !==
+                pendingManualChargeRequest.signature;
+            if (fieldsChanged || manualChargeStorageError) {
+              clearPendingManualChargeRequest();
+            }
+          });
+        });
+        if (manualChargeStorageError) {
+          showBillingMessage(manualChargeStorageError, "error");
+        } else if (pendingManualChargeRequest) {
+          showBillingMessage(
+            "A pending payment request was restored. Retry it unchanged or edit a field to start a different charge.",
+          );
         }
 
         async function fetchAndRenderCharges() {
@@ -641,15 +847,9 @@
         }
 
         // Send invoice
-        document
-          .getElementById("btn-send-invoice")
-          .addEventListener("click", async () => {
-            const name = document.getElementById("billing-name").value.trim();
-            const email = document.getElementById("billing-email").value.trim();
-            const desc = document.getElementById("billing-desc").value.trim();
-            const amount = parseFloat(
-              document.getElementById("billing-amount").value,
-            );
+        sendInvoiceButton.addEventListener("click", async () => {
+            const requestFields = readManualChargeFields();
+            const { name, email, desc, amount } = requestFields;
 
             if (!name || !email || !desc || !amount || amount <= 0) {
               showBillingMessage(
@@ -659,22 +859,105 @@
               return;
             }
 
+            const requestSignature = JSON.stringify(requestFields);
+            if (manualChargeStorageError) {
+              showBillingMessage(manualChargeStorageError, "error");
+              return;
+            }
             try {
+              if (
+                !pendingManualChargeRequest ||
+                pendingManualChargeRequest.signature !== requestSignature
+              ) {
+                const nextRequest = {
+                  requestId: createManualChargeRequestId(),
+                  signature: requestSignature,
+                  recoveryChargeId: null,
+                  fields: requestFields,
+                };
+                if (!persistPendingManualChargeRequest(nextRequest)) {
+                  showBillingMessage(manualChargeStorageError, "error");
+                  return;
+                }
+                pendingManualChargeRequest = nextRequest;
+              } else if (
+                !persistPendingManualChargeRequest(pendingManualChargeRequest)
+              ) {
+                showBillingMessage(manualChargeStorageError, "error");
+                return;
+              }
+            } catch (error) {
+              showBillingMessage(
+                "This browser cannot create a secure payment request identifier.",
+                "error",
+              );
+              return;
+            }
+            const activeManualChargeRequest = pendingManualChargeRequest;
+            setManualChargeFormBusy(true);
+
+            try {
+              const activeFields = activeManualChargeRequest.fields;
+              const requestBody = {
+                guest_name: activeFields.name,
+                guest_email: activeFields.email,
+                description: activeFields.desc,
+                amount: activeFields.amount,
+                request_id: activeManualChargeRequest.requestId,
+              };
+              if (activeManualChargeRequest.recoveryChargeId != null) {
+                requestBody.recovery_charge_id =
+                  activeManualChargeRequest.recoveryChargeId;
+              }
+
               const response = await fetchWithAuth(
                 `${API_URL}/api/admin/charges`,
                 {
                   method: "POST",
-                  body: JSON.stringify({
-                    guest_name: name,
-                    guest_email: email,
-                    description: desc,
-                    amount,
-                  }),
+                  body: JSON.stringify(requestBody),
                 },
               );
               const result = await response.json();
-              if (!response.ok)
+              if (!response.ok) {
+                const recoveryChargeId = result.recovery?.charge_id;
+                if (recoveryChargeId != null) {
+                  activeManualChargeRequest.recoveryChargeId = recoveryChargeId;
+                  if (
+                    pendingManualChargeRequest === activeManualChargeRequest &&
+                    !persistPendingManualChargeRequest(
+                      activeManualChargeRequest,
+                    )
+                  ) {
+                    showBillingMessage(manualChargeStorageError, "error");
+                    return;
+                  }
+                }
+
+                if (result.code === "MANUAL_CHARGE_RECOVERY_REQUIRED") {
+                  showBillingMessage(
+                    `Charge #${recoveryChargeId} requires recovery. Keep these fields unchanged and click Send Payment Link again to continue this same charge safely.`,
+                    "error",
+                  );
+                  return;
+                }
+
+                if (
+                  result.code ===
+                  "MANUAL_CHARGE_MANUAL_RECONCILIATION_REQUIRED"
+                ) {
+                  showBillingMessage(
+                    `Charge #${recoveryChargeId} requires manual Stripe reconciliation before any retry. Do not create a new charge until it is reconciled.`,
+                    "error",
+                  );
+                  return;
+                }
+
                 throw new Error(result.error || "Failed to create charge");
+              }
+
+              if (result.request_id !== activeManualChargeRequest.requestId) {
+                throw new Error("The charge response request ID did not match");
+              }
 
               if (result.url) {
                 // Copy payment link to clipboard for the admin to send
@@ -697,15 +980,25 @@
                 );
               }
 
-              // Clear form
-              document.getElementById("billing-name").value = "";
-              document.getElementById("billing-email").value = "";
-              document.getElementById("billing-desc").value = "";
-              document.getElementById("billing-amount").value = "";
+              // Do not erase a different charge the operator began while this
+              // request was in flight.
+              if (pendingManualChargeRequest === activeManualChargeRequest) {
+                const clearedPendingRequest =
+                  clearPendingManualChargeRequest();
+                document.getElementById("billing-name").value = "";
+                document.getElementById("billing-email").value = "";
+                document.getElementById("billing-desc").value = "";
+                document.getElementById("billing-amount").value = "";
+                if (!clearedPendingRequest) {
+                  showBillingMessage(manualChargeStorageError, "error");
+                }
+              }
 
               fetchAndRenderCharges();
             } catch (error) {
               showBillingMessage(`Error: ${error.message}`, "error");
+            } finally {
+              setManualChargeFormBusy(false);
             }
           });
 
@@ -719,10 +1012,20 @@
 
             if (target.classList.contains("btn-mark-paid")) {
               try {
-                await fetchWithAuth(
+                const response = await fetchWithAuth(
                   `${API_URL}/api/admin/charges/${chargeId}/pay`,
                   { method: "POST" },
                 );
+                if (!response.ok) {
+                  const result = await response.json().catch(() => ({}));
+                  throw new Error(
+                    result.error ||
+                      `Mark paid failed with status ${response.status}`,
+                  );
+                }
+                if (!clearResolvedManualChargeRequest(chargeId)) {
+                  showBillingMessage(manualChargeStorageError, "error");
+                }
                 fetchAndRenderCharges();
               } catch (error) {
                 console.error("Error marking charge as paid:", error);
@@ -732,10 +1035,20 @@
             if (target.classList.contains("btn-charge-delete")) {
               if (confirm(`Delete charge #${chargeId}?`)) {
                 try {
-                  await fetchWithAuth(
+                  const response = await fetchWithAuth(
                     `${API_URL}/api/admin/charges/${chargeId}`,
                     { method: "DELETE" },
                   );
+                  if (!response.ok) {
+                    const result = await response.json().catch(() => ({}));
+                    throw new Error(
+                      result.error ||
+                        `Delete charge failed with status ${response.status}`,
+                    );
+                  }
+                  if (!clearResolvedManualChargeRequest(chargeId)) {
+                    showBillingMessage(manualChargeStorageError, "error");
+                  }
                   fetchAndRenderCharges();
                 } catch (error) {
                   console.error("Error deleting charge:", error);
