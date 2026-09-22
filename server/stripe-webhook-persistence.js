@@ -1,9 +1,54 @@
 const { run, get } = require("./db-promises");
 
+function validateKeyedManualChargeSession(charge, session) {
+  // Legacy rows intentionally have no request identity. Preserve their existing
+  // session-ID compatibility path instead of inventing a new binding during a
+  // webhook. Rows created by the keyed protocol must match every server-owned
+  // field before the webhook is allowed to mutate payment state.
+  if (charge.request_id == null) return;
+
+  const metadata = session.metadata || {};
+  const expectedAmount = Math.round(Number(charge.amount) * 100);
+  if (
+    !session.id ||
+    metadata.charge_id !== String(charge.id) ||
+    metadata.request_id !== charge.request_id ||
+    metadata.guest_name !== charge.guest_name ||
+    metadata.guest_email !== charge.guest_email ||
+    session.mode !== "payment" ||
+    session.amount_total !== expectedAmount ||
+    session.currency !== "usd"
+  ) {
+    throw new Error(
+      `Stripe session does not match keyed manual charge #${charge.id}`,
+    );
+  }
+}
+
 async function persistManualCharge(db, session) {
   const metadata = session.metadata || {};
   const chargeId = metadata.charge_id;
   if (!chargeId || session.payment_status !== "paid") return false;
+
+  const expectedCharge = await get(
+    db,
+    `SELECT id, guest_name, guest_email, amount, status, stripe_session_id,
+            request_id
+     FROM manual_charges WHERE id = ?`,
+    [chargeId],
+  );
+  if (!expectedCharge) {
+    throw new Error(`Manual charge #${chargeId} not found`);
+  }
+  validateKeyedManualChargeSession(expectedCharge, session);
+  if (
+    expectedCharge.stripe_session_id &&
+    expectedCharge.stripe_session_id !== session.id
+  ) {
+    throw new Error(
+      `Manual charge #${chargeId} belongs to another Stripe session`,
+    );
+  }
 
   const result = await run(
     db,
@@ -13,8 +58,15 @@ async function persistManualCharge(db, session) {
          stripe_session_id = COALESCE(stripe_session_id, ?)
      WHERE id = ?
        AND COALESCE(status, '') <> 'paid'
-       AND (stripe_session_id IS NULL OR stripe_session_id = ?)`,
-    [session.id, chargeId, session.id],
+       AND (stripe_session_id IS NULL OR stripe_session_id = ?)
+       AND ((request_id IS NULL AND ? IS NULL) OR request_id = ?)`,
+    [
+      session.id,
+      chargeId,
+      session.id,
+      expectedCharge.request_id,
+      expectedCharge.request_id,
+    ],
   );
 
   if (result.changes > 0) {
@@ -25,12 +77,15 @@ async function persistManualCharge(db, session) {
   // A zero-row update is safe only when this is a genuine duplicate delivery.
   const existing = await get(
     db,
-    `SELECT id, status, stripe_session_id FROM manual_charges WHERE id = ?`,
+    `SELECT id, guest_name, guest_email, amount, status, stripe_session_id,
+            request_id
+     FROM manual_charges WHERE id = ?`,
     [chargeId],
   );
   if (!existing) {
     throw new Error(`Manual charge #${chargeId} not found`);
   }
+  validateKeyedManualChargeSession(existing, session);
   if (
     existing.stripe_session_id &&
     existing.stripe_session_id !== session.id
@@ -39,6 +94,14 @@ async function persistManualCharge(db, session) {
   }
   if (existing.status !== "paid") {
     throw new Error(`Manual charge #${chargeId} was not persisted as paid`);
+  }
+  if (
+    existing.request_id != null &&
+    existing.stripe_session_id !== session.id
+  ) {
+    throw new Error(
+      `Keyed manual charge #${chargeId} is paid without the expected Stripe session`,
+    );
   }
 
   return false;

@@ -229,10 +229,25 @@ db.run(
     amount REAL NOT NULL,
     status TEXT DEFAULT 'pending',
     stripe_session_id TEXT,
+    request_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     paid_at TEXT
 )`,
   requiredStep("Error al crear la tabla manual_charges"),
+);
+
+// Forward migration for the durable manual-charge idempotency protocol. Existing
+// rows intentionally remain NULL: without a request identifier there is no safe
+// way to prove whether an earlier Stripe Checkout create succeeded before its
+// database linkage was lost.
+db.run(
+  `ALTER TABLE manual_charges ADD COLUMN request_id TEXT`,
+  compatibilityColumn("manual_charges", "request_id"),
+);
+db.run(
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_charges_request_id
+   ON manual_charges(request_id) WHERE request_id IS NOT NULL`,
+  requiredStep("Error al crear el índice único de manual_charges.request_id"),
 );
 
 // This probe is last in the serialized queue. Readiness is successful only when
