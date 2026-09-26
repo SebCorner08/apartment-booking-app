@@ -12,7 +12,10 @@ const firstPartyApiPattern =
   /const API_URL = [\s\S]*?\?\s*`http:\/\/\$\{window\.location\.hostname\}:3001`\s*:\s*"";/;
 
 for (const [name, source] of Object.entries({ login, admin, taxSettings })) {
-  assert(!source.includes("admin_token"), `${name} must not access admin_token`);
+  assert(
+    !source.includes("admin_token"),
+    `${name} must not access admin_token`,
+  );
   assert(
     !source.includes("Authorization: `Bearer"),
     `${name} must not expose a bearer token`,
@@ -37,7 +40,10 @@ assert(
   "logout control must clear the server cookie",
 );
 const logoutHandlerStart = admin.indexOf('getElementById("btn-logout")');
-const logoutHandlerEnd = admin.indexOf("function createRow", logoutHandlerStart);
+const logoutHandlerEnd = admin.indexOf(
+  "function createRow",
+  logoutHandlerStart,
+);
 assert(
   logoutHandlerStart !== -1 && logoutHandlerEnd > logoutHandlerStart,
   "admin must register a logout click handler",
@@ -121,8 +127,11 @@ assert(
   "CSP must not allow arbitrary script origins",
 );
 assert(
-  netlify.includes("script-src") && netlify.includes("https://elfsightcdn.com"),
-  "CSP must permit the configured Elfsight script",
+  /script-src[^;]*https:\/\/elfsightcdn\.com/.test(netlify) &&
+    /script-src[^;]*https:\/\/universe-static\.elfsightcdn\.com/.test(netlify),
+  "CSP must permit the Elfsight loader and widget bundle",
 );
 
-console.log("admin browser session, first-party API, and CSP regression check passed");
+console.log(
+  "admin browser session, first-party API, and CSP regression check passed",
+);
