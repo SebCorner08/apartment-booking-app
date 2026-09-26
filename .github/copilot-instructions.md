@@ -1,3 +1,5 @@
+> **MANDATORY PRE-ISSUE HOOK**: Before creating any GitHub issue, read and apply `.github/AI_ISSUE_GUARD.md`. Do not create governance-only, authorization-only, status-only or duplicate issues.
+
 # Apartment Booking App — AI coding instructions
 
 Before reviewing, editing, testing, or proposing code changes in this repository, read the repository bootstrap and governance files in this exact order:
