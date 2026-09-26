@@ -6,6 +6,11 @@
 >
 > Required startup order: `BUILD_VERIFICATION.md → AGENTS.md → DEVELOPMENT_PROCESS.md → assigned specialist role file when applicable → exact GitHub issue/branch evidence → implementation files`.
 
+
+> **MANDATORY PRE-ISSUE HOOK**
+>
+> Before any AI actor creates a GitHub issue, read and apply [`.github/AI_ISSUE_GUARD.md`](.github/AI_ISSUE_GUARD.md). Governance-only, authorization-only, status-only and duplicate issues are prohibited. Repository Owner authorization for existing technical work must not be converted into a second authorization issue.
+
 > **ABSOLUTE MAIN-BRANCH RULE**
 >
 > No AI actor may merge, squash, rebase, fast-forward, force-update or directly write implementation code to `main` unless the Repository Owner gives an explicit merge instruction for that specific PR/change. Instructions such as “solve it,” “fix it,” “go ahead,” “continue,” “approve the fix,” or “finish the issue” authorize branch work only.
