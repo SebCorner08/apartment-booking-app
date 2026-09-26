@@ -56,10 +56,10 @@
 2. `AGENTS.md`
 3. `.github/AI_ISSUE_GUARD.md` before any issue-creation action
 4. `DEVELOPMENT_PROCESS.md`
-4. Assigned specialist role file when applicable
-5. Exact GitHub issue
-6. Exact issue branch and commit SHA
-7. Relevant implementation files
+5. Assigned specialist role file when applicable
+6. Exact GitHub issue
+7. Exact issue branch and commit SHA
+8. Relevant implementation files
 
 A chat instruction such as “go ahead,” “solve it,” “fix it,” “continue,” or “finish it” authorizes branch work only. It does not authorize merge to `main`.
 
