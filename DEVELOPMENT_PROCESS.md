@@ -14,6 +14,10 @@ GitHub is the canonical execution record for issues, branches, commits, PRs, rev
 
 A chat instruction never silently skips scope, ownership, evidence or merge authorization. Evidence belongs to the exact issue, branch and head SHA being evaluated.
 
+## Mandatory pre-issue hook
+
+Before any AI actor creates a GitHub issue, it must read and apply `.github/AI_ISSUE_GUARD.md`. Governance-only, authorization-only, status-only and duplicate issues must not be created. Reuse an existing technical story when it already covers the work.
+
 ## Non-negotiable ownership rules
 
 1. The principal assistant is Lead Integrator and permanent Web Implementation Owner.
