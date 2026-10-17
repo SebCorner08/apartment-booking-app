@@ -1218,7 +1218,7 @@ span.flatpickr-weekday {
 
 #contact-info {
   padding: 72px 0 112px;
-  background: #fff;
+  background: #cee6f0;
   scroll-margin-top: 90px;
 }
 
@@ -1236,7 +1236,7 @@ span.flatpickr-weekday {
 
 .homepage-contact-heading h2 {
   margin-bottom: 12px;
-  color: #172a30;
+  color: #1d4e66;
   font-family: Georgia, "Times New Roman", serif;
   font-size: clamp(2.6rem, 5vw, 3.6rem);
   line-height: 1.1;
@@ -1244,7 +1244,7 @@ span.flatpickr-weekday {
 
 .homepage-contact-heading p {
   margin: 0;
-  color: #526b74;
+  color: #1d4e66;
 }
 
 .homepage-contact-options {
@@ -1272,15 +1272,15 @@ span.flatpickr-weekday {
 }
 
 .contact-call {
-  background: #27c3c5;
+  background: #6adaee;
 }
 
 .contact-text {
-  background: #e1ad61;
+  background: #6298b7;
 }
 
 .contact-whatsapp {
-  background: #ed4b50;
+  background: #2e86ab;
 }
 
 .homepage-contact-icon {
