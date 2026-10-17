@@ -794,10 +794,12 @@
             throw new Error(
               "Cannot save settings until server pricing settings load successfully",
             );
+          }
 
           const minimumNights = Number(minimumNightsInput.value);
           if (!Number.isInteger(minimumNights) || minimumNights < 1) {
             throw new Error("Minimum stay must be a positive integer");
+          }
 
           const response = await fetch(`${API_URL}/api/admin/tax-settings`, {
             method: "POST",
