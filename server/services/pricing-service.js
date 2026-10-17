@@ -66,9 +66,35 @@ function createPricingService(db) {
     };
   }
 
+  function weeklyDuration(checkIn, checkOut) {
+    const validDate = (value) => {
+      if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const date = new Date(`${value}T00:00:00Z`);
+      return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+    };
+    if (!validDate(checkIn) || !validDate(checkOut)) return null;
+    const nights = (new Date(`${checkOut}T00:00:00Z`) - new Date(`${checkIn}T00:00:00Z`)) / 86400000;
+    if (nights < 7 || nights > MAX_NIGHTS || nights % 7 !== 0) return null;
+    return { nights, weeks: nights / 7 };
+  }
+
+  function calculateWeeklyPrice(weeks, weeklyRate, cleaningFee, taxRates) {
+    // Use the same fee, tax and rounding policy as short stays, once per stay.
+    const { nightly_rate, ...pricing } = calculateTotalPrice(
+      weeks, weeklyRate, cleaningFee, taxRates,
+    );
+    return {
+      ...pricing,
+      rental_type: "weekly",
+      nights: weeks * 7,
+      weeks,
+      weekly_rate: weeklyRate,
+    };
+  }
+
   function getLatestPricingRow() {
     const sql = `
-      SELECT nightly_rate, monthly_rate, cleaning_fee, minimum_nights,
+      SELECT nightly_rate, monthly_rate, weekly_rate, cleaning_fee, minimum_nights,
              mecklenburg_sales, mecklenburg_occupancy
       FROM tax_settings
       ORDER BY updated_at DESC, id DESC
@@ -102,12 +128,13 @@ function createPricingService(db) {
         db.run(
           `INSERT INTO tax_settings (
              nc_state, mecklenburg_local, occupancy,
-             nightly_rate, monthly_rate, cleaning_fee, minimum_nights,
+             nightly_rate, monthly_rate, weekly_rate, cleaning_fee, minimum_nights,
              mecklenburg_sales, mecklenburg_occupancy, updated_at
-           ) VALUES (0, 0, 0, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+           ) VALUES (0, 0, 0, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
           [
             pricing.nightly_rate,
             pricing.monthly_rate,
+            pricing.weekly_rate,
             pricing.cleaning_fee,
             pricing.minimum_nights,
             pricing.mecklenburg_sales,
@@ -127,6 +154,8 @@ function createPricingService(db) {
     validateRequiredTaxUpdate,
     calculateTotalPrice,
     calculateMonthlyPrice,
+    calculateWeeklyPrice,
+    weeklyDuration,
     loadRatesFromDB,
     loadTaxSettingsFromDB,
     savePricingSettings,

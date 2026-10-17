@@ -18,7 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Estado de fechas bloqueadas (rangos completos)
   let bookedDateRanges = [];
-  let currentRentalType = "short_stay"; // "short_stay" o "monthly"
+  let currentRentalType = "short_stay"; // short_stay, weekly, monthly
   let priceRequestSequence = 0;
 
   /**
@@ -68,6 +68,10 @@ document.addEventListener("DOMContentLoaded", () => {
   function setRentalType(type) {
     currentRentalType = type;
     const isMonthly = type === "monthly";
+    document.getElementById("weekly-stay-help").hidden = type !== "weekly";
+    if (priceDisplay) priceDisplay.innerHTML = "";
+    bookingMessage.textContent = "";
+    bookingMessage.className = "booking-message";
 
     shortStayFields.style.display = isMonthly ? "none" : "block";
     monthlyFields.style.display = isMonthly ? "block" : "none";
@@ -90,6 +94,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   rentalBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (btn.disabled) return;
       rentalBtns.forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       setRentalType(btn.dataset.type);
@@ -233,6 +238,18 @@ document.addEventListener("DOMContentLoaded", () => {
   // de precio consulta sus selecciones actuales.
   setRentalType("short_stay");
 
+  // A weekly price is offered only after the owner configures it.
+  fetch(`${API_URL}/api/weekly-rate`)
+    .then((response) => response.ok ? response.json() : null)
+    .then((rate) => {
+      if (rate?.available && Number.isFinite(rate.weekly_rate) && rate.weekly_rate > 0) {
+        const button = document.getElementById("weekly-rental-btn");
+        button.hidden = false;
+        button.disabled = false;
+      }
+    })
+    .catch(() => {}); // Keep the option unavailable if its price cannot load.
+
   // ============ FECHAS BLOQUEADAS ============
 
   fetchBookedDates();
@@ -268,6 +285,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function updatePriceDisplay() {
     const requestSequence = ++priceRequestSequence;
+    const rentalType = currentRentalType;
     const checkInDate = checkinPicker.selectedDates[0];
     const checkOutDate = checkoutPicker.selectedDates[0];
 
@@ -299,6 +317,7 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify({
           checkIn: formatDateLocal(checkInDate),
           checkOut: formatDateLocal(checkOutDate),
+          rental_type: rentalType,
         }),
       });
 
@@ -328,7 +347,7 @@ document.addEventListener("DOMContentLoaded", () => {
         priceDisplay.innerHTML = `
             <div class="price-breakdown">
               <div class="price-row">
-                <span>Nightly rate × ${nights} nights:</span>
+                <span>${rentalType === "weekly" ? `Weekly rate $${pricing.weekly_rate.toFixed(2)} × ${pricing.weeks} week(s)` : `Nightly rate × ${nights} nights`}:</span>
                 <span>$${pricing.subtotal.toFixed(2)}</span>
               </div>${cleaningRow}
               <div class="price-row tax-row">
@@ -362,7 +381,10 @@ document.addEventListener("DOMContentLoaded", () => {
   function showBookingConfirmation({ checkIn, checkOut, nights, pricing }) {
     document.getElementById("confirm-checkin").textContent = checkIn;
     document.getElementById("confirm-checkout").textContent = checkOut;
-    document.getElementById("confirm-nights").textContent = nights;
+    document.getElementById("confirm-nights").textContent = pricing.rental_type === "weekly"
+      ? `${pricing.weeks} week(s) · ${nights} nights` : `${nights} nights`;
+    document.getElementById("confirm-cleaning-row").hidden = !(pricing.cleaning_fee > 0);
+    document.getElementById("confirm-cleaning").textContent = `$${(pricing.cleaning_fee || 0).toFixed(2)}`;
     document.getElementById("confirm-base").textContent =
       `$${pricing.subtotal.toFixed(2)}`;
     document.getElementById("confirm-meck-sales").textContent =
@@ -433,6 +455,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!priceResponse.ok) throw new Error("Failed to calculate price");
         const pricing = await priceResponse.json();
 
+        document.getElementById("confirm-cleaning-row").hidden = true;
         // Mostrar confirmación adaptada para mensual
         document.getElementById("confirm-checkin").textContent = checkIn;
         document.getElementById("confirm-checkout").textContent = checkOut;
@@ -505,7 +528,8 @@ document.addEventListener("DOMContentLoaded", () => {
           throw new Error("No checkout URL provided");
         }
       } else {
-        // ── Estancia Corta ──
+        // Short and weekly stays share dates; preserve the selected mode through confirmation.
+        const rentalType = currentRentalType;
         const checkInDate = checkinPicker.selectedDates[0];
         const checkOutDate = checkoutPicker.selectedDates[0];
 
@@ -546,7 +570,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const priceResponse = await fetch(`${API_URL}/api/calculate-price`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ checkIn, checkOut }),
+          body: JSON.stringify({ checkIn, checkOut, rental_type: rentalType }),
         });
 
         if (!priceResponse.ok) {
@@ -577,6 +601,7 @@ document.addEventListener("DOMContentLoaded", () => {
             body: JSON.stringify({
               checkIn,
               checkOut,
+              rental_type: rentalType,
               guests: guestsSelect ? parseInt(guestsSelect.value) : 2,
             }),
           },

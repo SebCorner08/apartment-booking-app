@@ -466,6 +466,17 @@
               </div>
             </div>
 
+            <!-- Weekly Rental Rate -->
+            <div class="form-group">
+              <label for="weeklyRate">Weekly Rental Rate (USD)</label>
+              <div class="description">Price per 7 nights, before cleaning and taxes. Set to 0 to turn off weekly bookings.</div>
+              <div class="input-group">
+                <span class="percent-sign">$</span>
+                <input type="number" id="weeklyRate" step="0.01" min="0" required />
+                <span class="percent-sign">/week</span>
+              </div>
+            </div>
+
             <!-- Monthly Rental Rate -->
             <div class="form-group">
               <label>Monthly Rental Rate (USD)</label>
@@ -637,6 +648,7 @@
       const loading = document.getElementById("loading");
       const salesInput = document.getElementById("mecklenburgSales");
       const occupancyInput = document.getElementById("mecklenburgOccupancy");
+      const weeklyRateInput = document.getElementById("weeklyRate");
       const monthlyRateInput = document.getElementById("monthlyRate");
       const minimumNightsInput = document.getElementById("minimumNights");
       const resetBtn = document.getElementById("resetBtn");
@@ -646,6 +658,7 @@
         mecklenburg_sales: 8.25,
         mecklenburg_occupancy: 8.0,
         monthly_rate: 1800,
+        weekly_rate: 0,
       };
       let authoritativeMinimumNights = null;
 
@@ -748,6 +761,7 @@
             data.mecklenburg_occupancy != null
               ? data.mecklenburg_occupancy
               : DEFAULT_RATES.mecklenburg_occupancy;
+          weeklyRateInput.value = data.weekly_rate ?? 0;
           monthlyRateInput.value =
             data.monthly_rate != null
               ? data.monthly_rate
@@ -780,6 +794,7 @@
         salesInput.value = DEFAULT_RATES.mecklenburg_sales;
         occupancyInput.value = DEFAULT_RATES.mecklenburg_occupancy;
         monthlyRateInput.value = DEFAULT_RATES.monthly_rate;
+        weeklyRateInput.value = DEFAULT_RATES.weekly_rate;
         minimumNightsInput.value = authoritativeMinimumNights ?? "";
         setSaveAvailability();
         updateTaxPreview();
@@ -811,6 +826,7 @@
               mecklenburg_sales: parseFloat(salesInput.value),
               mecklenburg_occupancy: parseFloat(occupancyInput.value),
               monthly_rate: parseFloat(monthlyRateInput.value),
+              weekly_rate: Number(weeklyRateInput.value),
               minimum_nights: minimumNights,
             }),
           });

@@ -5,6 +5,7 @@ const MAX_NIGHTS = 365;
 const PRICING_FIELDS = [
   "nightly_rate",
   "monthly_rate",
+  "weekly_rate",
   "cleaning_fee",
   "mecklenburg_sales",
   "mecklenburg_occupancy",
@@ -48,6 +49,8 @@ function buildDefaultPricing(env = process.env) {
     validatePricingSettings({
       nightly_rate: envNumber(env, "NIGHTLY_RATE", 150),
       monthly_rate: envNumber(env, "MONTHLY_RATE", 1800),
+      // Weekly rentals stay unavailable until an owner saves a rate.
+      weekly_rate: 0,
       cleaning_fee: envNumber(env, "CLEANING_FEE", 0),
       mecklenburg_sales: envNumber(env, "TAX_MECKLENBURG_SALES", 8.25),
       mecklenburg_occupancy: envNumber(

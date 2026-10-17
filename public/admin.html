@@ -534,10 +534,12 @@
           const isPastOrCancelled =
             booking.bookingStatus !== "confirmed" || checkOutDate < new Date();
           const rentalType =
-            booking.rental_type === "monthly" ? "Monthly" : "Short Stay";
+            booking.rental_type === "monthly" ? "Monthly" : booking.rental_type === "weekly" ? "Weekly" : "Short Stay";
           const typeBadge =
             booking.rental_type === "monthly"
               ? `<span style="background:#667eea;color:white;padding:2px 8px;border-radius:4px;font-size:11px;">Monthly</span>`
+              : booking.rental_type === "weekly"
+              ? `<span style="background:#23777c;color:white;padding:2px 8px;border-radius:4px;font-size:11px;">Weekly</span>`
               : `<span style="background:#95a5a6;color:white;padding:2px 8px;border-radius:4px;font-size:11px;">Short Stay</span>`;
 
           tr.innerHTML = `

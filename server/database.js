@@ -108,6 +108,7 @@ db.run(
     mecklenburg_sales REAL DEFAULT 8.25,
     mecklenburg_occupancy REAL DEFAULT 8.00,
     monthly_rate REAL DEFAULT 1800,
+    weekly_rate REAL NOT NULL DEFAULT 0,
     nightly_rate REAL DEFAULT 150,
     cleaning_fee REAL DEFAULT 0,
     minimum_nights INTEGER DEFAULT 10
@@ -136,6 +137,13 @@ db.run(
 db.run(
   `ALTER TABLE tax_settings ADD COLUMN monthly_rate REAL DEFAULT 1800`,
   compatibilityColumn("tax_settings", "monthly_rate"),
+);
+
+// Additive migration: zero disables weekly rentals without changing existing
+// rates/history. Do not derive an unapproved weekly rate from other prices.
+db.run(
+  `ALTER TABLE tax_settings ADD COLUMN weekly_rate REAL NOT NULL DEFAULT 0`,
+  compatibilityColumn("tax_settings", "weekly_rate"),
 );
 
 // Migración: agregar columna de tarifa por noche en tax_settings
@@ -185,16 +193,18 @@ db.run(
     mecklenburg_sales,
     mecklenburg_occupancy,
     monthly_rate,
+    weekly_rate,
     nightly_rate,
     cleaning_fee,
     minimum_nights
   )
-  SELECT 0, 0, 0, datetime('now'), ?, ?, ?, ?, ?, ?
+  SELECT 0, 0, 0, datetime('now'), ?, ?, ?, ?, ?, ?, ?
   WHERE NOT EXISTS (SELECT 1 FROM tax_settings)`,
   [
     DEFAULT_PRICING.mecklenburg_sales,
     DEFAULT_PRICING.mecklenburg_occupancy,
     DEFAULT_PRICING.monthly_rate,
+    DEFAULT_PRICING.weekly_rate,
     DEFAULT_PRICING.nightly_rate,
     DEFAULT_PRICING.cleaning_fee,
     DEFAULT_PRICING.minimum_nights,

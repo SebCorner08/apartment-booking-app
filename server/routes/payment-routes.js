@@ -64,6 +64,7 @@ function registerPaymentRoutes(app, {
     let finalCheckOut = checkOut;
     let nights = null;
     let monthsInt = null;
+    let weeks = null;
 
     if (rental_type === "monthly") {
       monthsInt = parseInt(months, 10);
@@ -103,12 +104,22 @@ function registerPaymentRoutes(app, {
           .status(400)
           .json({ error: `Maximum stay is ${pricingService.MAX_NIGHTS} nights` });
       }
+      if (rental_type === "weekly") {
+        const duration = pricingService.weeklyDuration(checkIn, checkOut);
+        if (!duration) {
+          return res.status(400).json({ error: "Weekly stays must be 1–52 whole weeks (7 nights per week) with valid dates" });
+        }
+        weeks = duration.weeks;
+      }
     }
 
     let holdId = null;
     try {
       const rates = await pricingService.loadRatesFromDB();
-      if (rental_type !== "monthly" && nights < rates.minimum_nights) {
+      if (rental_type === "weekly" && rates.weekly_rate <= 0) {
+        return res.status(400).json({ error: "Weekly rentals are not currently available" });
+      }
+      if (rental_type !== "monthly" && rental_type !== "weekly" && nights < rates.minimum_nights) {
         return res
           .status(400)
           .json({ error: `Minimum stay is ${rates.minimum_nights} nights` });
@@ -116,6 +127,8 @@ function registerPaymentRoutes(app, {
       const pricing =
         rental_type === "monthly"
           ? pricingService.calculateMonthlyPrice(monthsInt, rates.monthly_rate, rates)
+          : rental_type === "weekly"
+          ? pricingService.calculateWeeklyPrice(weeks, rates.weekly_rate, rates.cleaning_fee, rates)
           : pricingService.calculateTotalPrice(
               nights,
               rates.nightly_rate,
@@ -133,7 +146,7 @@ function registerPaymentRoutes(app, {
       holdId = await bookingService.createHold({
         checkIn: finalCheckIn,
         checkOut: finalCheckOut,
-        rentalType: rental_type === "monthly" ? "monthly" : "short_stay",
+        rentalType: pricing.rental_type,
       });
       if (!holdId) {
         return res
@@ -145,7 +158,7 @@ function registerPaymentRoutes(app, {
         hold_id: holdId,
         checkIn: finalCheckIn,
         checkOut: finalCheckOut,
-        rental_type: rental_type === "monthly" ? "monthly" : "short_stay",
+        rental_type: pricing.rental_type,
         guests: String(guestsInt),
       };
 
@@ -155,6 +168,11 @@ function registerPaymentRoutes(app, {
         metadata.months = String(monthsInt);
         productName = "Lakeside Serenity - Monthly Rental";
         productDescription = `${monthsInt} month(s): ${finalCheckIn} to ${finalCheckOut}`;
+      } else if (rental_type === "weekly") {
+        metadata.weeks = String(weeks);
+        metadata.nights = String(nights);
+        productName = "Lakeside Serenity - Weekly Rental";
+        productDescription = `${weeks} week(s), ${nights} nights: ${finalCheckIn} to ${finalCheckOut}`;
       } else {
         metadata.nights = String(nights);
         productName = "Lakeside Serenity - Apartment Stay";

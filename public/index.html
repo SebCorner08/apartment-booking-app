@@ -416,6 +416,9 @@
                 >
                   <i class="fas fa-moon"></i> Short Stay
                 </button>
+                <button type="button" class="rental-type-btn" data-type="weekly" id="weekly-rental-btn" hidden disabled>
+                  <i class="fas fa-calendar-week" aria-hidden="true"></i> Weekly Rental
+                </button>
                 <button
                   type="button"
                   class="rental-type-btn"
@@ -427,6 +430,7 @@
 
               <!-- Short Stay Fields -->
               <div id="short-stay-fields">
+                <p id="weekly-stay-help" hidden>Choose a stay in whole weeks (7, 14, 21 nights…). The weekly rate, cleaning fee and taxes appear below.</p>
                 <div class="booking-form-grid">
                   <!-- Check-in -->
                   <div class="form-group">
@@ -553,7 +557,7 @@
                     <strong id="confirm-checkout"></strong>
                   </div>
                   <div class="confirm-modal-row">
-                    <span>Nights</span>
+                    <span>Stay</span>
                     <strong id="confirm-nights"></strong>
                   </div>
                 </div>
@@ -562,6 +566,10 @@
                   <div class="confirm-modal-row">
                     <span>Base</span>
                     <strong id="confirm-base"></strong>
+                  </div>
+                  <div class="confirm-modal-row" id="confirm-cleaning-row" hidden>
+                    <span>Cleaning fee</span>
+                    <strong id="confirm-cleaning"></strong>
                   </div>
                   <div class="confirm-modal-row">
                     <span>Meck. Sales Tax</span>
