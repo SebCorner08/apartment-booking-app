@@ -28,6 +28,7 @@ function harness({ available = true } = {}) {
   const pickers = {};
   const requests = [];
   let quoteError = null;
+  let networkError = false;
   let quoteWait = null;
   const quote = { rental_type: "weekly", weeks: 2, nights: 14, weekly_rate: 1500,
     subtotal: 3000, cleaning_fee: 100, mecklenburg_sales_tax: 255.75,
@@ -46,6 +47,7 @@ function harness({ available = true } = {}) {
       if (url.endsWith("/bookings")) return { ok: true, json: async () => [] };
       if (url.endsWith("/calculate-price")) {
         if (quoteWait) await quoteWait;
+        if (networkError) throw new Error("Network unavailable");
         return { ok: !quoteError, json: async () => quoteError ? { error: quoteError } : quote };
       }
       if (url.endsWith("/create-checkout-session")) return { ok: true, json: async () => ({ id: "test-only-session", url: "https://example.test/mock-checkout" }) };
@@ -58,6 +60,7 @@ function harness({ available = true } = {}) {
     select: type => buttons.find(btn => btn.dataset.type === type).listeners.click(),
     dates: () => { pickers["#checkin"].selectedDates = [new Date(2027, 0, 4)]; pickers["#checkout"].selectedDates = [new Date(2027, 0, 18)]; },
     rejectQuote: message => quoteError = message,
+    failNetwork: () => networkError = true,
     deferQuote: promise => quoteWait = promise,
   };
 }
@@ -103,5 +106,22 @@ function harness({ available = true } = {}) {
   let release; stale.deferQuote(new Promise(resolve => release = resolve));
   stale.select("weekly"); await flush(); stale.select("monthly"); release(); await flush();
   assert.equal(stale.element("price-display").innerHTML, "", "stale weekly quote must not overwrite monthly mode");
+
+  for (const failure of ["http", "network"]) {
+    const monthly = harness(); await flush();
+    monthly.element("monthly-start").value = "2027-01-04";
+    monthly.element("monthly-duration").value = "3";
+    monthly.select("monthly"); await flush();
+    assert.match(monthly.element("price-display").innerHTML, /3 month\(s\)/);
+    monthly.element("monthly-duration").value = "6";
+    if (failure === "http") monthly.rejectQuote("Pricing configuration unavailable");
+    else monthly.failNetwork();
+    const refresh = monthly.element("monthly-duration").listeners.change();
+    assert.equal(monthly.element("price-display").innerHTML, "", "clear old quote as soon as replacement starts");
+    await refresh;
+    assert.equal(monthly.element("price-display").innerHTML, "", "failed replacement must not show old monthly quote");
+    assert.equal(monthly.element("booking-message").className, "booking-message error");
+    assert.ok(monthly.element("booking-message").textContent);
+  }
   console.log("PASS: weekly availability, quote, breakdown, confirmation, checkout contract and stale-response protection");
 })().catch(error => { console.error(error); process.exitCode = 1; });

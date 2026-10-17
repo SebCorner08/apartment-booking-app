@@ -112,6 +112,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const requestSequence = ++priceRequestSequence;
     const startDate = monthlyStartInput.value;
     const months = parseInt(monthlyDurationSelect.value) || 3;
+    if (priceDisplay) priceDisplay.innerHTML = "";
+    bookingMessage.textContent = "";
+    bookingMessage.className = "booking-message";
 
     if (!startDate) {
       if (priceDisplay) priceDisplay.innerHTML = "";
@@ -134,6 +137,11 @@ document.addEventListener("DOMContentLoaded", () => {
         currentRentalType !== "monthly"
       ) {
         return;
+      }
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.error || "Unable to calculate monthly price. Please try again.");
       }
 
       if (response.ok) {
@@ -175,6 +183,9 @@ document.addEventListener("DOMContentLoaded", () => {
       ) {
         return;
       }
+      if (priceDisplay) priceDisplay.innerHTML = "";
+      bookingMessage.textContent = error.message || "Unable to calculate monthly price. Please try again.";
+      bookingMessage.className = "booking-message error";
       console.error("Error calculating monthly price:", error);
     }
   }
