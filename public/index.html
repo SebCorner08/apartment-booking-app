@@ -139,30 +139,32 @@
           <li><a href="#gallery">Gallery</a></li>
           <li><a href="#location">Location</a></li>
           <li><a href="#reviews">Reviews</a></li>
+          <li><a href="contact.html">Contact</a></li>
           <li>
             <a href="#contact" class="btn btn-primary nav-btn">Reserve Now</a>
           </li>
         </ul>
 
         <!-- botón de hamburguesa para telf -->
-        <div class="nav-toggle" id="nav-toggle">
-          <i class="fas fa-bars"></i>
-        </div>
+        <button type="button" class="nav-toggle" id="nav-toggle" aria-label="Open navigation" aria-controls="nav-menu-mobile" aria-expanded="false">
+          <span aria-hidden="true">☰</span>
+        </button>
 
         <!-- Menú desplegable para telf hide -->
-        <div class="nav-menu-mobile" id="nav-menu-mobile">
+        <div class="nav-menu-mobile" id="nav-menu-mobile" aria-hidden="true" inert>
           <ul class="nav-list-mobile">
             <li><a href="#about" class="nav-link-mobile">About</a></li>
             <li><a href="#amenities" class="nav-link-mobile">Amenities</a></li>
             <li><a href="#gallery" class="nav-link-mobile">Gallery</a></li>
             <li><a href="#location" class="nav-link-mobile">Location</a></li>
+            <li><a href="contact.html" class="nav-link-mobile">Contact</a></li>
             <li>
               <a href="#reviews" class="nav-link-mobile">Reviews</a>
             </li>
           </ul>
-          <div class="nav-close" id="nav-close">
-            <i class="fas fa-times"></i>
-          </div>
+          <button type="button" class="nav-close" id="nav-close" aria-label="Close navigation">
+            <span aria-hidden="true">×</span>
+          </button>
         </div>
       </nav>
     </header>
@@ -626,6 +628,7 @@
 
     <footer>
       <div class="container">
+        <p><a href="contact.html" class="footer-contact">Contact your host · Text or WhatsApp</a></p>
         <p>
           &copy; <span id="year"></span> Lakeside Serenity Davidson. All rights
           reserved.
@@ -709,24 +712,35 @@
         const navClose = document.getElementById("nav-close");
         const navLinks = document.querySelectorAll(".nav-link-mobile");
 
+        function closeNavigation() {
+          navMenu.classList.remove("show-menu");
+          navMenu.inert = true;
+          navMenu.setAttribute("aria-hidden", "true");
+          navToggle.setAttribute("aria-expanded", "false");
+          navToggle.focus();
+        }
+
         // Función para mostrar el menú
         if (navToggle) {
           navToggle.addEventListener("click", () => {
             navMenu.classList.add("show-menu");
+            navMenu.inert = false;
+            navMenu.setAttribute("aria-hidden", "false");
+            navToggle.setAttribute("aria-expanded", "true");
+            navLinks[0]?.focus();
           });
         }
 
         // Función para ocultar el menú
         if (navClose) {
-          navClose.addEventListener("click", () => {
-            navMenu.classList.remove("show-menu");
-          });
+          navClose.addEventListener("click", closeNavigation);
         }
+        navMenu.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") closeNavigation();
+        });
         // Función para cerrar el menú al hacer clic en el enlace
         navLinks.forEach((link) => {
-          link.addEventListener("click", () => {
-            navMenu.classList.remove("show-menu");
-          });
+          link.addEventListener("click", closeNavigation);
         });
       });
     </script>

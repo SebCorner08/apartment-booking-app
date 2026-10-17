@@ -175,6 +175,8 @@ nav a:hover::after {
   width: 100%;
 }
 
+.nav-menu-desktop { gap: 24px; }
+
 .nav-btn {
   background-color: rgba(255, 255, 255, 0);
   border-color: rgba(255, 255, 255, 0.9);
@@ -890,6 +892,19 @@ footer p {
 .show-menu {
   right: 0;
 }
+
+@media (min-width: 769px) and (max-width: 1100px) {
+  .nav-menu-desktop { display: none; }
+  .nav-toggle { display: block; }
+}
+
+/* Accessible Contact navigation */
+.nav-toggle, .nav-close { border: 0; padding: 4px; background: transparent; line-height: 1; }
+.nav-close { display: block; color: #234655; }
+.nav-toggle:focus-visible { outline: 3px solid white; outline-offset: 4px; }
+.nav-close:focus-visible { outline: 3px solid #234655; outline-offset: 4px; }
+footer .footer-contact { color: white; text-decoration: underline; }
+footer .footer-contact:focus-visible { outline: 3px solid white; outline-offset: 4px; }
 
 /* Estilo responsivo */
 
