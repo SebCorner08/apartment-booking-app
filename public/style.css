@@ -903,8 +903,6 @@ footer p {
 .nav-close { display: block; color: #234655; }
 .nav-toggle:focus-visible { outline: 3px solid white; outline-offset: 4px; }
 .nav-close:focus-visible { outline: 3px solid #234655; outline-offset: 4px; }
-footer .footer-contact { color: white; text-decoration: underline; }
-footer .footer-contact:focus-visible { outline: 3px solid white; outline-offset: 4px; }
 
 /* Estilo responsivo */
 
@@ -1276,7 +1274,7 @@ span.flatpickr-weekday {
 .contact-call,
 .contact-text,
 .contact-whatsapp {
-  background: linear-gradient(135deg, #6298b7 0%, #6adaee 100%);
+  background: #6adaee;
 }
 
 .homepage-contact-icon {

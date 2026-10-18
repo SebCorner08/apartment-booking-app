@@ -17,8 +17,8 @@ assert(
   "Contact must be the final homepage section, before the footer",
 );
 assert(
-  (index.match(/href="#contact-info"/g) || []).length >= 3,
-  "desktop, mobile, and footer navigation must point to the in-page section",
+  (index.match(/href="#contact-info"/g) || []).length >= 2,
+  "desktop and mobile navigation must point to the in-page section",
 );
 assert(
   !index.includes("contact.html") && !sitemap.includes("contact.html"),
