@@ -1237,29 +1237,35 @@ span.flatpickr-weekday {
 .homepage-contact-heading h2 {
   margin-bottom: 12px;
   color: #1d4e66;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(2.6rem, 5vw, 3.6rem);
+  font-family: var(--font-heading);
+  font-size: clamp(2rem, 4vw, 2.6rem);
   line-height: 1.1;
 }
 
 .homepage-contact-heading p {
   margin: 0;
   color: #1d4e66;
+  font-family: var(--font-body);
 }
 
 .homepage-contact-options {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 20px;
 }
 
 .homepage-contact-option {
   display: flex;
   min-width: 0;
-  min-height: 205px;
+  min-height: 0;
   align-items: center;
-  gap: clamp(16px, 3vw, 38px);
-  padding: 32px clamp(20px, 4vw, 56px);
-  color: #061416;
+  gap: 14px;
+  padding: 16px 20px;
+  color: #fff;
+  font-family: var(--font-body);
   text-decoration: none;
   transition:
     transform 180ms ease,
@@ -1267,35 +1273,25 @@ span.flatpickr-weekday {
     box-shadow 180ms ease;
 }
 
-.homepage-contact-option + .homepage-contact-option {
-  border-left: 2px solid rgba(255, 255, 255, 0.8);
-}
-
-.contact-call {
-  background: #6adaee;
-}
-
-.contact-text {
-  background: #6298b7;
-}
-
+.contact-call,
+.contact-text,
 .contact-whatsapp {
-  background: #2e86ab;
+  background: linear-gradient(135deg, #6298b7 0%, #6adaee 100%);
 }
 
 .homepage-contact-icon {
   display: grid;
-  width: 66px;
-  height: 66px;
-  flex: 0 0 66px;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
   place-items: center;
   border: 2px solid currentColor;
   border-radius: 50%;
 }
 
 .homepage-contact-icon svg {
-  width: 36px;
-  height: 36px;
+  width: 22px;
+  height: 22px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -1308,29 +1304,32 @@ span.flatpickr-weekday {
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 7px;
+  gap: 3px;
 }
 
 .homepage-contact-label {
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.09em;
+  font-size: 0.65rem;
+  font-weight: 550;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
 }
 
 .homepage-contact-title {
-  font-size: clamp(1.05rem, 1.5vw, 1.4rem);
-  font-weight: 700;
+  font-size: 0.9rem;
+  font-weight: 550;
+  letter-spacing: 1.5px;
   line-height: 1.2;
+  text-transform: uppercase;
 }
 
 .homepage-contact-prompt {
-  font-size: 0.82rem;
-  line-height: 1.45;
+  font-size: 0.75rem;
+  line-height: 1.35;
 }
 
 .homepage-contact-arrow {
-  align-self: flex-end;
-  font-size: 1.2rem;
+  align-self: center;
+  font-size: 1.1rem;
   font-weight: 700;
 }
 
@@ -1343,8 +1342,8 @@ span.flatpickr-weekday {
 
 .homepage-contact-option:focus-visible {
   z-index: 2;
-  outline: 3px solid #061416;
-  outline-offset: -7px;
+  outline: 3px solid #1d4e66;
+  outline-offset: 3px;
 }
 
 @media (max-width: 850px) {
@@ -1357,31 +1356,7 @@ span.flatpickr-weekday {
   }
 
   .homepage-contact-option {
-    min-height: 150px;
-    padding: 28px clamp(24px, 8vw, 56px);
-  }
-
-  .homepage-contact-option + .homepage-contact-option {
-    border-top: 2px solid rgba(255, 255, 255, 0.8);
-    border-left: 0;
-  }
-}
-
-@media (max-width: 380px) {
-  .homepage-contact-option {
-    gap: 14px;
-    padding: 24px 18px;
-  }
-
-  .homepage-contact-icon {
-    width: 54px;
-    height: 54px;
-    flex-basis: 54px;
-  }
-
-  .homepage-contact-icon svg {
-    width: 30px;
-    height: 30px;
+    padding: 14px 18px;
   }
 }
 
