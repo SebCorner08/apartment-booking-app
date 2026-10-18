@@ -81,44 +81,47 @@ function createBookingService({ db, holdMinutes }) {
           .slice(0, 19)
           .replace("T", " ");
 
+        function rollback(error, result = null) {
+          // Finish our transaction before the next queued hold can start.
+          db.run("ROLLBACK", (rollbackErr) => {
+            if (error || rollbackErr) return reject(error || rollbackErr);
+            resolve(result);
+          });
+        }
+
         db.serialize(() => {
-          db.run("BEGIN IMMEDIATE TRANSACTION");
-          db.all(
-            `SELECT checkIn, checkOut FROM bookings WHERE bookingStatus = 'confirmed'
-             UNION ALL
-             SELECT checkIn, checkOut FROM external_blocks
-             UNION ALL
-             SELECT checkIn, checkOut FROM booking_holds
-             WHERE status = 'active' AND expires_at > datetime('now')`,
-            [],
-            (err, rows) => {
-              if (err) {
-                db.run("ROLLBACK");
-                return reject(err);
-              }
-              const hasOverlap = rows.some(
-                (row) => checkIn < row.checkOut && checkOut > row.checkIn,
-              );
-              if (hasOverlap) {
-                db.run("ROLLBACK");
-                return resolve(null);
-              }
-              db.run(
-                `INSERT INTO booking_holds (id, checkIn, checkOut, rental_type, expires_at) VALUES (?, ?, ?, ?, ?)`,
-                [holdId, checkIn, checkOut, rentalType, expiresAt],
-                (insertErr) => {
-                  if (insertErr) {
-                    db.run("ROLLBACK");
-                    return reject(insertErr);
-                  }
-                  db.run("COMMIT", (commitErr) => {
-                    if (commitErr) return reject(commitErr);
-                    resolve(holdId);
-                  });
-                },
-              );
-            },
-          );
+          db.run("BEGIN IMMEDIATE TRANSACTION", (beginErr) => {
+            // An independent calendar import can hold SQLite's write lock longer
+            // than busyTimeout. Never query/rollback a transaction we did not open.
+            if (beginErr) return reject(beginErr);
+            db.all(
+              `SELECT checkIn, checkOut FROM bookings WHERE bookingStatus = 'confirmed'
+               UNION ALL
+               SELECT checkIn, checkOut FROM external_blocks
+               UNION ALL
+               SELECT checkIn, checkOut FROM booking_holds
+               WHERE status = 'active' AND expires_at > datetime('now')`,
+              [],
+              (err, rows) => {
+                if (err) return rollback(err);
+                const hasOverlap = rows.some(
+                  (row) => checkIn < row.checkOut && checkOut > row.checkIn,
+                );
+                if (hasOverlap) return rollback(null);
+                db.run(
+                  `INSERT INTO booking_holds (id, checkIn, checkOut, rental_type, expires_at) VALUES (?, ?, ?, ?, ?)`,
+                  [holdId, checkIn, checkOut, rentalType, expiresAt],
+                  (insertErr) => {
+                    if (insertErr) return rollback(insertErr);
+                    db.run("COMMIT", (commitErr) => {
+                      if (commitErr) return rollback(commitErr);
+                      resolve(holdId);
+                    });
+                  },
+                );
+              },
+            );
+          });
         });
       });
 

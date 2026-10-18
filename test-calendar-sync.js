@@ -9,6 +9,7 @@ const { createCalendarService, SYNC_INTERVAL_MS, CALENDAR_UNAVAILABLE } = requir
 const { createBookingService } = require("./server/services/booking-service");
 const { registerBookingRoutes } = require("./server/routes/booking-routes");
 const { registerPaymentRoutes } = require("./server/routes/payment-routes");
+const { handleStripeWebhookRequest } = require("./server/stripe-webhook-persistence");
 
 function deferred() {
   let resolve;
@@ -34,10 +35,10 @@ async function fixture(t, options = {}) {
   db.ready = Promise.resolve();
   await new Promise((resolve, reject) => db.exec(`
     CREATE TABLE external_blocks (id INTEGER PRIMARY KEY, source TEXT NOT NULL, uid TEXT NOT NULL, checkIn TEXT NOT NULL, checkOut TEXT NOT NULL, UNIQUE(source, uid));
-    CREATE TABLE bookings (id INTEGER PRIMARY KEY, checkIn TEXT, checkOut TEXT, bookingStatus TEXT);
+    CREATE TABLE bookings (id INTEGER PRIMARY KEY, checkIn TEXT, checkOut TEXT, bookingStatus TEXT, stripePaymentId TEXT UNIQUE, rental_type TEXT, guests INTEGER);
     CREATE TABLE booking_holds (id TEXT PRIMARY KEY, checkIn TEXT, checkOut TEXT, rental_type TEXT, status TEXT DEFAULT 'active', expires_at TEXT);
     INSERT INTO external_blocks (source, uid, checkIn, checkOut) VALUES ('airbnb', 'old', '2027-01-01', '2027-01-04'), ('vrbo', 'other', '2027-02-01', '2027-02-02');
-    INSERT INTO bookings VALUES (1, '2027-03-01', '2027-03-04', 'confirmed');
+    INSERT INTO bookings (id, checkIn, checkOut, bookingStatus) VALUES (1, '2027-03-01', '2027-03-04', 'confirmed');
   `, (err) => err ? reject(err) : resolve()));
   t.after(async () => { await close(db); await fs.rm(dir, { recursive: true, force: true }); });
   const state = { text: feed(event("new")), calls: 0, broadcasts: 0, successes: 0, errors: 0 };
@@ -191,12 +192,47 @@ test("import rollback cannot roll back concurrent application writes", async (t)
   await run(db, "CREATE TRIGGER fail_delete BEFORE DELETE ON external_blocks BEGIN SELECT RAISE(ABORT, 'injected'); END");
   const rejected = assert.rejects(service.syncAirbnbCalendar());
   await pause.entered;
-  const concurrentWrite = run(db, "INSERT INTO bookings VALUES (2, '2027-05-01', '2027-05-03', 'confirmed')");
+  const concurrentWrite = run(db, "INSERT INTO bookings (id, checkIn, checkOut, bookingStatus) VALUES (2, '2027-05-01', '2027-05-03', 'confirmed')");
   pause.release();
   await rejected;
   await concurrentWrite;
   assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings")).count, 2);
   assert.equal((await snapshot(db))[0].uid, "old");
+});
+
+test("a long import lock rejects a concurrent hold safely, then retry sees committed blocks", async (t) => {
+  const { db } = await fixture(t);
+  const pause = pausedDatabase(db, /^CREATE TEMP TABLE/);
+  const { service } = await fixture(t, { db, openDatabase: pause.openDatabase });
+  const booking = createBookingService({ db, holdMinutes: 35 });
+  const syncing = service.syncAirbnbCalendar();
+  await pause.entered;
+  const args = { checkIn: "2027-01-10", checkOut: "2027-01-15", rentalType: "short_stay" };
+  // Keep the import write lock until the application's default busy timeout
+  // actually fires (>1 second). An unchecked BEGIN emits an unhandled Statement
+  // error and terminates this process instead of rejecting this promise.
+  await assert.rejects(booking.createHold(args), { code: "SQLITE_BUSY" });
+  assert.equal((await get(db, "SELECT COUNT(*) AS count FROM booking_holds")).count, 0);
+  const webhook = async () => {
+    const res = response();
+    await handleStripeWebhookRequest({
+      db, res, req: { body: Buffer.from("fixture"), headers: { "stripe-signature": "fixture" } },
+      stripe: { webhooks: { constructEvent: () => ({ type: "checkout.session.completed", data: { object: {
+        id: "cs_lock_retry", payment_status: "paid", metadata: { checkIn: "2027-06-01", checkOut: "2027-06-04" },
+      } } }) } },
+      webhookSecret: "fixture", broadcastAdminUpdate: () => {}, logger: { error() {} },
+    });
+    return res;
+  };
+  assert.equal((await webhook()).statusCode, 500, "locked webhook must request retry, not acknowledge lost payment");
+  pause.release();
+  await syncing;
+  assert.equal((await webhook()).statusCode, 200);
+  assert.equal((await webhook()).statusCode, 200);
+  assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = 'cs_lock_retry'")).count, 1);
+  assert.equal(await booking.createHold(args), null);
+  const free = await booking.createHold({ ...args, checkIn: "2027-04-01", checkOut: "2027-04-05" });
+  assert.ok(free, "hold queue must recover after failed BEGIN and overlap rollback");
 });
 
 function routes() {
