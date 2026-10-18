@@ -177,7 +177,10 @@ const checkoutLimiter = rateLimit({
   message: { error: "Too many payment attempts. Please try again later." },
 });
 
-registerBookingRoutes(app, { db });
+registerBookingRoutes(app, {
+  db,
+  ensureFreshAirbnbCalendar: calendarService.ensureFreshAirbnbCalendar,
+});
 registerPricingRoutes(app, {
   pricingService,
   bookingService,
@@ -238,8 +241,7 @@ function startServer() {
     setInterval(bookingService.cleanupExpiredHolds, 5 * 60 * 1000);
 
     if (AIRBNB_ICAL_URL) {
-      calendarService.syncAirbnbCalendar();
-      setInterval(calendarService.syncAirbnbCalendar, 15 * 60 * 1000);
+      calendarService.startAutoSync();
     } else {
       console.log(
         "ℹ️ AIRBNB_ICAL_URL no configurado: sincronización con Airbnb desactivada.",

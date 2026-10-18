@@ -18,6 +18,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Estado de fechas bloqueadas (rangos completos)
   let bookedDateRanges = [];
+  let availabilityLoaded = false;
+  let availabilityRequest = null;
+  let paymentInProgress = false;
+  const availabilityError = "Availability is temporarily unavailable. Please try again shortly.";
   let currentRentalType = "short_stay"; // "short_stay" o "monthly"
   let priceRequestSequence = 0;
 
@@ -26,6 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
    * Compara cada día del calendario contra los rangos bloqueados.
    */
   function isDateDisabled(date) {
+    if (!availabilityLoaded) return true;
     const y = date.getFullYear();
     const m = String(date.getMonth() + 1).padStart(2, "0");
     const d = String(date.getDate()).padStart(2, "0");
@@ -80,6 +85,8 @@ document.addEventListener("DOMContentLoaded", () => {
       el.disabled = !isMonthly;
       el.required = isMonthly;
     });
+
+    if (monthlyStartInput) monthlyStartInput.disabled = !isMonthly || !availabilityLoaded;
 
     if (isMonthly) {
       updateMonthlyPriceDisplay();
@@ -238,18 +245,54 @@ document.addEventListener("DOMContentLoaded", () => {
   fetchBookedDates();
   setInterval(fetchBookedDates, 30000);
 
-  async function fetchBookedDates() {
-    try {
-      const response = await fetch(`${API_URL}/api/bookings`);
-      if (response.ok) {
-        bookedDateRanges = await response.json();
-        // Refrescar los calendarios con las nuevas fechas
+  function fetchBookedDates() {
+    if (availabilityRequest) return availabilityRequest;
+    availabilityRequest = (async () => {
+      const controller = new AbortController();
+      let timeout;
+      try {
+        const ranges = await Promise.race([
+          (async () => {
+            const response = await fetch(`${API_URL}/api/bookings`, {
+              cache: "no-store", signal: controller.signal,
+            });
+            if (!response.ok) throw new Error("Availability request failed");
+            return response.json();
+          })(),
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => {
+              controller.abort();
+              reject(new Error("Availability request timed out"));
+            }, 15000);
+          }),
+        ]);
+        if (!Array.isArray(ranges) || ranges.some((range) =>
+          !range || typeof range.from !== "string" || typeof range.to !== "string" ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(range.from) || !/^\d{4}-\d{2}-\d{2}$/.test(range.to) ||
+          range.to <= range.from)) throw new Error("Invalid availability response");
+        bookedDateRanges = ranges;
+        availabilityLoaded = true;
+        if (bookingMessage.textContent === availabilityError) {
+          bookingMessage.textContent = "";
+          bookingMessage.className = "booking-message";
+        }
+        return true;
+      } catch {
+        // Preserve the last known blocks, but never display unchecked dates as available.
+        availabilityLoaded = false;
+        if (!paymentInProgress) {
+          bookingMessage.textContent = availabilityError;
+          bookingMessage.className = "booking-message error";
+        }
+        return false;
+      } finally {
+        clearTimeout(timeout);
         checkinPicker.set("disable", [isDateDisabled]);
         checkoutPicker.set("disable", [isDateDisabled]);
+        if (monthlyStartInput) monthlyStartInput.disabled = currentRentalType !== "monthly" || !availabilityLoaded;
       }
-    } catch (error) {
-      console.error("Error fetching booked dates:", error);
-    }
+    })().finally(() => { availabilityRequest = null; });
+    return availabilityRequest;
   }
 
   // ============ VALIDACIONES ============
@@ -396,10 +439,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   bookingForm.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (paymentInProgress) return;
     bookingMessage.textContent = "";
     bookingMessage.className = "booking-message";
 
     try {
+      if (!(await fetchBookedDates())) return;
       if (currentRentalType === "monthly") {
         // ── Arriendo Mensual ──
         const startDate = monthlyStartInput.value;
@@ -412,11 +457,16 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         // Calcular fechas de check-in y check-out para el calendario
-        const start = new Date(startDate);
+        const start = new Date(`${startDate}T00:00:00`);
         const end = new Date(start);
         end.setMonth(end.getMonth() + months);
         const checkIn = formatDateLocal(start);
         const checkOut = formatDateLocal(end);
+        if (!isRangeAvailable(start, end)) {
+          bookingMessage.textContent = "One or more dates in this range are no longer available. Please select different dates.";
+          bookingMessage.className = "booking-message error";
+          return;
+        }
 
         bookingMessage.textContent = "Calculating price...";
         bookingMessage.className = "booking-message";
@@ -470,6 +520,7 @@ document.addEventListener("DOMContentLoaded", () => {
           return;
         }
 
+        paymentInProgress = true;
         bookingMessage.textContent = "Preparing secure payment... Please wait.";
         bookingMessage.className = "booking-message";
 
@@ -530,9 +581,6 @@ document.addEventListener("DOMContentLoaded", () => {
           (checkOutDate - checkInDate) / (1000 * 60 * 60 * 24),
         );
 
-        // Recargar fechas antes de validar
-        await fetchBookedDates();
-
         if (!isRangeAvailable(checkInDate, checkOutDate)) {
           bookingMessage.textContent =
             "One or more dates in this range are no longer available. Please select different dates.";
@@ -566,6 +614,7 @@ document.addEventListener("DOMContentLoaded", () => {
           return;
         }
 
+        paymentInProgress = true;
         bookingMessage.textContent = "Preparing secure payment... Please wait.";
         bookingMessage.className = "booking-message";
 
@@ -605,6 +654,8 @@ document.addEventListener("DOMContentLoaded", () => {
       console.error("Payment error:", error);
       bookingMessage.textContent = `Error: ${error.message}. Please try again or contact us.`;
       bookingMessage.className = "booking-message error";
+    } finally {
+      paymentInProgress = false;
     }
   });
 });

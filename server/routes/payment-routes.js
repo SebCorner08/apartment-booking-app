@@ -1,3 +1,5 @@
+const { CALENDAR_UNAVAILABLE } = require("../services/calendar-service");
+
 function registerStripeWebhookRoute(app, {
   express,
   stripe,
@@ -127,7 +129,13 @@ function registerPaymentRoutes(app, {
         return res.status(400).json({ error: "Invalid booking amount" });
       }
 
-      if (airbnbIcalUrl) await syncAirbnbCalendar();
+      if (airbnbIcalUrl) {
+        try {
+          await syncAirbnbCalendar();
+        } catch {
+          return res.status(503).json({ error: CALENDAR_UNAVAILABLE, code: "CALENDAR_UNAVAILABLE" });
+        }
+      }
 
       bookingService.cleanupExpiredHolds();
       holdId = await bookingService.createHold({

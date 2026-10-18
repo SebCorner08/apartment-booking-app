@@ -1,5 +1,13 @@
-function registerBookingRoutes(app, { db }) {
-  app.get("/api/bookings", (req, res) => {
+const { CALENDAR_UNAVAILABLE } = require("../services/calendar-service");
+
+function registerBookingRoutes(app, { db, ensureFreshAirbnbCalendar }) {
+  app.get("/api/bookings", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    try {
+      await ensureFreshAirbnbCalendar();
+    } catch {
+      return res.status(503).json({ error: CALENDAR_UNAVAILABLE, code: "CALENDAR_UNAVAILABLE" });
+    }
     const sql = `
       SELECT checkIn, checkOut FROM bookings WHERE bookingStatus = 'confirmed'
       UNION ALL
