@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { runWithBusyRetry } = require("../db-promises");
 
 function createBookingService({ db, holdMinutes }) {
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -47,31 +48,59 @@ function createBookingService({ db, holdMinutes }) {
     );
   }
 
+  // Hold writes must share createHold's queue: a callback on this connection
+  // alone does not prove durability if it ran inside another hold's transaction.
+  let holdQueue = Promise.resolve();
+  function queueHoldWrite(operation) {
+    const result = holdQueue.then(operation, operation);
+    holdQueue = result.catch(() => {});
+    return result;
+  }
+
+  function linkHoldSession(holdId, sessionId) {
+    return queueHoldWrite(async () => {
+      if (!holdId || !sessionId) throw new Error("Missing hold or payment session");
+      const result = await runWithBusyRetry(db,
+        `UPDATE booking_holds SET stripe_session_id = ?
+         WHERE id = ? AND (stripe_session_id IS NULL OR stripe_session_id = ?)
+         AND ((status = 'active' AND expires_at > datetime('now'))
+           OR (status = 'confirmed' AND stripe_session_id = ?))`,
+        [sessionId, holdId, sessionId, sessionId]);
+      if (result.changes !== 1) throw new Error("Payment hold is no longer active");
+    });
+  }
+
   function releaseHold(holdId) {
-    if (!holdId) return;
-    db.run(
+    if (!holdId) return Promise.resolve();
+    return queueHoldWrite(() => runWithBusyRetry(db,
       `UPDATE booking_holds SET status = 'released' WHERE id = ? AND status = 'active'`,
-      [holdId],
-    );
+      [holdId]));
   }
 
   function releaseHoldBySession(sessionId) {
-    if (!sessionId) return;
-    db.run(
+    if (!sessionId) return Promise.resolve();
+    return queueHoldWrite(() => runWithBusyRetry(db,
       `UPDATE booking_holds SET status = 'released' WHERE stripe_session_id = ? AND status = 'active'`,
-      [sessionId],
-    );
+      [sessionId]));
+  }
+
+  function recordConfirmedBooking({ checkIn, checkOut, sessionId, rentalType, guests }) {
+    // The browser confirmation insert must not be committed/rolled back as part
+    // of another customer's createHold transaction on this connection.
+    return queueHoldWrite(() => runWithBusyRetry(db,
+      `INSERT OR IGNORE INTO bookings
+       (checkIn, checkOut, bookingStatus, stripePaymentId, rental_type, guests)
+       VALUES (?, ?, 'confirmed', ?, ?, ?)`,
+      [checkIn, checkOut, sessionId, rentalType, guests]));
   }
 
   function confirmHold(holdId, sessionId) {
-    if (!holdId) return;
-    db.run(
+    if (!holdId) return Promise.resolve();
+    return queueHoldWrite(() => runWithBusyRetry(db,
       `UPDATE booking_holds SET status = 'confirmed', stripe_session_id = COALESCE(?, stripe_session_id) WHERE id = ?`,
-      [sessionId || null, holdId],
-    );
+      [sessionId || null, holdId]));
   }
 
-  let holdQueue = Promise.resolve();
   function createHold({ checkIn, checkOut, rentalType }) {
     const run = () =>
       new Promise((resolve, reject) => {
@@ -125,9 +154,7 @@ function createBookingService({ db, holdMinutes }) {
         });
       });
 
-    const result = holdQueue.then(run, run);
-    holdQueue = result.catch(() => {});
-    return result;
+    return queueHoldWrite(run);
   }
 
   return {
@@ -135,9 +162,11 @@ function createBookingService({ db, holdMinutes }) {
     isDateString,
     checkAvailability,
     cleanupExpiredHolds,
+    linkHoldSession,
     releaseHold,
     releaseHoldBySession,
     confirmHold,
+    recordConfirmedBooking,
     createHold,
   };
 }

@@ -12,9 +12,9 @@ const { registerPaymentRoutes } = require("./server/routes/payment-routes");
 const { handleStripeWebhookRequest } = require("./server/stripe-webhook-persistence");
 
 function deferred() {
-  let resolve;
-  const promise = new Promise((r) => { resolve = r; });
-  return { promise, resolve };
+  let resolve, reject;
+  const promise = new Promise((r, j) => { resolve = r; reject = j; });
+  return { promise, resolve, reject };
 }
 function open(filename) {
   return new Promise((resolve, reject) => {
@@ -36,7 +36,7 @@ async function fixture(t, options = {}) {
   await new Promise((resolve, reject) => db.exec(`
     CREATE TABLE external_blocks (id INTEGER PRIMARY KEY, source TEXT NOT NULL, uid TEXT NOT NULL, checkIn TEXT NOT NULL, checkOut TEXT NOT NULL, UNIQUE(source, uid));
     CREATE TABLE bookings (id INTEGER PRIMARY KEY, checkIn TEXT, checkOut TEXT, bookingStatus TEXT, stripePaymentId TEXT UNIQUE, rental_type TEXT, guests INTEGER);
-    CREATE TABLE booking_holds (id TEXT PRIMARY KEY, checkIn TEXT, checkOut TEXT, rental_type TEXT, status TEXT DEFAULT 'active', expires_at TEXT);
+    CREATE TABLE booking_holds (id TEXT PRIMARY KEY, checkIn TEXT, checkOut TEXT, rental_type TEXT, stripe_session_id TEXT, status TEXT DEFAULT 'active', expires_at TEXT);
     INSERT INTO external_blocks (source, uid, checkIn, checkOut) VALUES ('airbnb', 'old', '2027-01-01', '2027-01-04'), ('vrbo', 'other', '2027-02-01', '2027-02-02');
     INSERT INTO bookings (id, checkIn, checkOut, bookingStatus) VALUES (1, '2027-03-01', '2027-03-04', 'confirmed');
   `, (err) => err ? reject(err) : resolve()));
@@ -318,4 +318,242 @@ test("startup and scheduled errors are handled, and disabled sync does not fetch
   await disabled.syncAirbnbCalendar();
   await disabled.ensureFreshAirbnbCalendar();
   disabled.startAutoSync()();
+});
+
+function checkoutContext(db, overrides = {}) {
+  const app = routes();
+  const started = deferred();
+  const completion = deferred();
+  const booking = createBookingService({ db, holdMinutes: 35 });
+  const mockSessions = new Map();
+  const state = { creates: 0 };
+  const start = new Date(); start.setUTCDate(start.getUTCDate() + 20);
+  const end = new Date(start); end.setUTCDate(end.getUTCDate() + 5);
+  const req = { body: { checkIn: start.toISOString().slice(0, 10), checkOut: end.toISOString().slice(0, 10) } };
+  registerPaymentRoutes(app, {
+    checkoutLimiter: () => {}, mockPayments: false, mockSessions, db,
+    domain: "https://booking.invalid", airbnbIcalUrl: "configured", maxGuests: 6, maxAdvanceMonths: 18,
+    pricingService: { MAX_NIGHTS: 30, loadRatesFromDB: async () => ({ minimum_nights: 1 }), calculateTotalPrice: () => ({ total: 100 }) },
+    bookingService: booking, syncAirbnbCalendar: async () => {}, broadcastAdminUpdate: () => {},
+    stripe: { checkout: { sessions: { create: async (args) => {
+      state.creates++; state.createArgs = args; started.resolve(); return completion.promise;
+    } } } },
+    ...overrides,
+  });
+  const res = response();
+  return { app, req, res, booking, mockSessions, state, started: started.promise, completion,
+    start: () => app.handlers["POST /api/create-checkout-session"](req, res) };
+}
+function pausedImporter(db) {
+  const pause = pausedDatabase(db, /^CREATE TEMP TABLE/);
+  const service = createCalendarService({
+    db, airbnbIcalUrl: "https://calendar.invalid/fixture", openDatabase: pause.openDatabase,
+    fetchCalendar: async () => ({ ok: true, text: async () => feed() }),
+    broadcastAdminUpdate: () => {}, logger: { log() {}, error() {} },
+  });
+  return { pause, sync: service.syncAirbnbCalendar };
+}
+function observeLinkWrites(db) {
+  const firstBusy = deferred();
+  const state = { attempts: 0, firstBusy: firstBusy.promise };
+  const original = db.run.bind(db);
+  db.run = (sql, params, callback) => {
+    if (/^UPDATE booking_holds SET stripe_session_id/.test(sql)) {
+      state.attempts++;
+      assert.equal(typeof callback, "function", "session-link writes must have an error callback");
+      return original(sql, params, function (err) {
+        if (err?.code === "SQLITE_BUSY") firstBusy.resolve();
+        callback.call(this, err);
+      });
+    }
+    return callback === undefined ? original(sql, params) : original(sql, params, callback);
+  };
+  return state;
+}
+
+test("pending Stripe success during a long import lock waits/retries before returning a durable URL", async (t) => {
+  const { db } = await fixture(t);
+  const ctx = checkoutContext(db);
+  const request = ctx.start();
+  await ctx.started;
+  const writes = observeLinkWrites(db);
+  const { pause, sync } = pausedImporter(db);
+  const importing = sync();
+  await pause.entered;
+  ctx.completion.resolve({ id: "cs_durable", url: "https://checkout.invalid/session" });
+  await writes.firstBusy;
+  assert.equal(ctx.res.body, undefined, "must not return checkout URL on the first failed linkage attempt");
+  pause.release();
+  await importing;
+  await request;
+  assert.equal(ctx.res.statusCode, 200);
+  assert.equal(ctx.state.creates, 1, "never retry Stripe creation while retrying SQLite");
+  assert.equal(writes.attempts, 2);
+  const row = await get(db, "SELECT * FROM booking_holds WHERE id = ?", [ctx.state.createArgs.metadata.hold_id]);
+  assert.equal(row.stripe_session_id, "cs_durable");
+  assert.equal(row.status, "active");
+  assert.ok(ctx.state.createArgs.expires_at * 1000 < Date.parse(`${row.expires_at.replace(" ", "T")}Z`));
+});
+
+test("pending Stripe rejection under an import lock retains inventory without an unsafe release", async (t) => {
+  const { db } = await fixture(t);
+  const ctx = checkoutContext(db);
+  const request = ctx.start();
+  await ctx.started;
+  const { pause, sync } = pausedImporter(db);
+  const importing = sync();
+  await pause.entered;
+  ctx.completion.reject(new Error("ambiguous network failure after session create"));
+  await request;
+  assert.equal(ctx.res.statusCode, 503);
+  assert.equal(ctx.res.body.url, undefined);
+  assert.equal(ctx.state.creates, 1);
+  const hold = await get(db, "SELECT status FROM booking_holds WHERE id = ?", [ctx.state.createArgs.metadata.hold_id]);
+  assert.equal(hold.status, "active");
+  assert.equal(await ctx.booking.checkAvailability(ctx.req.body.checkIn, ctx.req.body.checkOut), false);
+  pause.release();
+  await importing;
+  assert.equal((await get(db, "SELECT status FROM booking_holds WHERE id = ?", [ctx.state.createArgs.metadata.hold_id])).status, "active");
+});
+
+test("session linkage retry exhaustion returns no URL and retains the potentially payable hold", async (t) => {
+  const { db } = await fixture(t);
+  const ctx = checkoutContext(db);
+  const request = ctx.start();
+  await ctx.started;
+  db.configure("busyTimeout", 20);
+  const writes = observeLinkWrites(db);
+  const { pause, sync } = pausedImporter(db);
+  const importing = sync();
+  await pause.entered;
+  ctx.completion.resolve({ id: "cs_still_payable", url: "https://checkout.invalid/session" });
+  await request;
+  assert.equal(writes.attempts, 3, "bounded SQL retry attempts must stop even if the lock remains");
+  assert.equal(ctx.res.statusCode, 503);
+  assert.equal(ctx.res.body.url, undefined);
+  assert.equal(ctx.state.creates, 1);
+  pause.release();
+  await importing;
+  const hold = await get(db, "SELECT status, stripe_session_id FROM booking_holds WHERE id = ?", [ctx.state.createArgs.metadata.hold_id]);
+  assert.deepEqual(hold, { status: "active", stripe_session_id: null });
+  assert.equal(await ctx.booking.createHold({ ...ctx.req.body, rentalType: "short_stay" }), null);
+});
+
+test("hard session linkage error is not retried and cannot release a successful Stripe session", async (t) => {
+  const { db } = await fixture(t);
+  const ctx = checkoutContext(db);
+  const request = ctx.start();
+  await ctx.started;
+  await run(db, "CREATE TRIGGER fail_link BEFORE UPDATE OF stripe_session_id ON booking_holds BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END");
+  const writes = observeLinkWrites(db);
+  ctx.completion.resolve({ id: "cs_success", url: "https://checkout.invalid/session" });
+  await request;
+  assert.equal(writes.attempts, 1);
+  assert.equal(ctx.res.statusCode, 503);
+  assert.equal(ctx.res.body.url, undefined);
+  assert.equal((await get(db, "SELECT status FROM booking_holds WHERE id = ?", [ctx.state.createArgs.metadata.hold_id])).status, "active");
+});
+
+for (const state of ["missing", "expired", "released", "conflicting", "confirmed"]) {
+  test(`checkout ${state} hold is checked before returning the session URL`, async (t) => {
+    const { db } = await fixture(t);
+    const ctx = checkoutContext(db);
+    const request = ctx.start();
+    await ctx.started;
+    const holdId = ctx.state.createArgs.metadata.hold_id;
+    if (state === "missing") await run(db, "DELETE FROM booking_holds WHERE id = ?", [holdId]);
+    if (state === "expired") await run(db, "UPDATE booking_holds SET expires_at = datetime('now', '-1 minute') WHERE id = ?", [holdId]);
+    if (state === "released") await run(db, "UPDATE booking_holds SET status = 'released' WHERE id = ?", [holdId]);
+    if (state === "conflicting") await run(db, "UPDATE booking_holds SET stripe_session_id = 'cs_other' WHERE id = ?", [holdId]);
+    if (state === "confirmed") await ctx.booking.confirmHold(holdId, "cs_result");
+    ctx.completion.resolve({ id: "cs_result", url: "https://checkout.invalid/session" });
+    await request;
+    assert.equal(ctx.res.statusCode, state === "confirmed" ? 200 : 503);
+    assert.equal(Boolean(ctx.res.body.url), state === "confirmed");
+    if (state === "conflicting") assert.equal((await get(db, "SELECT stripe_session_id FROM booking_holds WHERE id = ?", [holdId])).stripe_session_id, "cs_other");
+    if (state === "confirmed") assert.equal((await get(db, "SELECT status FROM booking_holds WHERE id = ?", [holdId])).status, "confirmed");
+  });
+}
+
+for (const method of ["releaseHold", "releaseHoldBySession", "confirmHold"]) {
+  test(`${method} reports lock exhaustion safely and succeeds when retried after import`, async (t) => {
+    const { db } = await fixture(t);
+    db.configure("busyTimeout", 20);
+    const booking = createBookingService({ db, holdMinutes: 35 });
+    const holdId = await booking.createHold({ checkIn: "2027-07-01", checkOut: "2027-07-05", rentalType: "short_stay" });
+    await booking.linkHoldSession(holdId, "cs_hold");
+    const { pause, sync } = pausedImporter(db);
+    const importing = sync();
+    await pause.entered;
+    const update = () => method === "releaseHoldBySession" ? booking[method]("cs_hold") : booking[method](holdId, "cs_hold");
+    await assert.rejects(update(), { code: "SQLITE_BUSY" });
+    assert.equal((await get(db, "SELECT status FROM booking_holds WHERE id = ?", [holdId])).status, "active");
+    pause.release();
+    await importing;
+    await update();
+    assert.equal((await get(db, "SELECT status FROM booking_holds WHERE id = ?", [holdId])).status, method === "confirmHold" ? "confirmed" : "released");
+  });
+}
+
+test("mock checkout awaits linkage and catches a failed release without publishing a mock session", async (t) => {
+  const { db } = await fixture(t);
+  await run(db, "CREATE TRIGGER fail_updates BEFORE UPDATE ON booking_holds BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END");
+  const ctx = checkoutContext(db, { mockPayments: true });
+  await ctx.start();
+  assert.equal(ctx.res.statusCode, 503);
+  assert.equal(ctx.res.body.url, undefined);
+  assert.equal(ctx.mockSessions.size, 0);
+  assert.equal((await get(db, "SELECT status FROM booking_holds")).status, "active");
+});
+
+test("booking confirmation waits for hold persistence, fails visibly, and remains idempotent on retry", async (t) => {
+  const { db } = await fixture(t);
+  const ctx = checkoutContext(db, { mockPayments: true });
+  await ctx.start();
+  const sessionId = ctx.res.body.id;
+  assert.ok(sessionId, "mock checkout must link durably before exposing its session");
+  await run(db, "CREATE TRIGGER fail_confirm BEFORE UPDATE OF status ON booking_holds BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END");
+  const first = response();
+  await ctx.app.handlers["POST /api/bookings"]({ body: { sessionId } }, first);
+  assert.equal(first.statusCode, 500);
+  assert.equal((await get(db, "SELECT status FROM booking_holds WHERE stripe_session_id = ?", [sessionId])).status, "active");
+  await run(db, "DROP TRIGGER fail_confirm");
+  const retry = response();
+  await ctx.app.handlers["POST /api/bookings"]({ body: { sessionId } }, retry);
+  assert.equal(retry.statusCode, 201);
+  assert.equal((await get(db, "SELECT status FROM booking_holds WHERE stripe_session_id = ?", [sessionId])).status, "confirmed");
+  assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = ?", [sessionId])).count, 1);
+});
+
+test("session linkage and confirmed booking insert cannot join another hold's rolled-back transaction", async (t) => {
+  const { db } = await fixture(t);
+  const booking = createBookingService({ db, holdMinutes: 35 });
+  const first = await booking.createHold({ checkIn: "2027-07-01", checkOut: "2027-07-05", rentalType: "short_stay" });
+  const entered = deferred(), release = deferred();
+  const original = db.run.bind(db);
+  let failCommit = true;
+  db.run = (sql, params, callback) => {
+    if (sql === "COMMIT" && failCommit) {
+      failCommit = false;
+      entered.resolve();
+      release.promise.then(() => (typeof params === "function" ? params : callback)(new Error("injected commit failure")));
+      return db;
+    }
+    return callback === undefined ? original(sql, params) : original(sql, params, callback);
+  };
+  const other = assert.rejects(booking.createHold({ checkIn: "2027-08-01", checkOut: "2027-08-05", rentalType: "short_stay" }));
+  await entered.promise;
+  let linked = false, recorded = false;
+  const linking = booking.linkHoldSession(first, "cs_queued").then(() => { linked = true; });
+  const recording = booking.recordConfirmedBooking({ checkIn: "2027-09-01", checkOut: "2027-09-05", sessionId: "cs_booking", rentalType: "short_stay", guests: 2 }).then(() => { recorded = true; });
+  await new Promise(setImmediate);
+  assert.equal(linked, false);
+  assert.equal(recorded, false);
+  release.resolve();
+  await other;
+  await linking;
+  await recording;
+  assert.equal((await get(db, "SELECT stripe_session_id FROM booking_holds WHERE id = ?", [first])).stripe_session_id, "cs_queued");
+  assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = 'cs_booking'")).count, 1);
+  assert.equal((await get(db, "SELECT COUNT(*) AS count FROM booking_holds WHERE checkIn = '2027-08-01'")).count, 0);
 });
