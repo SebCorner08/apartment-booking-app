@@ -1,3 +1,5 @@
+const { CALENDAR_UNAVAILABLE } = require("../services/calendar-service");
+
 function registerStripeWebhookRoute(app, {
   express,
   stripe,
@@ -106,6 +108,7 @@ function registerPaymentRoutes(app, {
     }
 
     let holdId = null;
+    let stripeCreateStarted = false;
     try {
       const rates = await pricingService.loadRatesFromDB();
       if (rental_type !== "monthly" && nights < rates.minimum_nights) {
@@ -127,7 +130,13 @@ function registerPaymentRoutes(app, {
         return res.status(400).json({ error: "Invalid booking amount" });
       }
 
-      if (airbnbIcalUrl) await syncAirbnbCalendar();
+      if (airbnbIcalUrl) {
+        try {
+          await syncAirbnbCalendar();
+        } catch {
+          return res.status(503).json({ error: CALENDAR_UNAVAILABLE, code: "CALENDAR_UNAVAILABLE" });
+        }
+      }
 
       bookingService.cleanupExpiredHolds();
       holdId = await bookingService.createHold({
@@ -163,11 +172,8 @@ function registerPaymentRoutes(app, {
 
       if (mockPayments) {
         const mockId = `mock_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        await bookingService.linkHoldSession(holdId, mockId);
         mockSessions.set(mockId, { payment_status: "paid", metadata });
-        db.run(`UPDATE booking_holds SET stripe_session_id = ? WHERE id = ?`, [
-          mockId,
-          holdId,
-        ]);
         return res.json({
           id: mockId,
           url: `${domain}/success.html?session_id=${mockId}`,
@@ -175,6 +181,10 @@ function registerPaymentRoutes(app, {
         });
       }
 
+      // A transport failure can occur after Stripe creates a payable session.
+      // Keep its hold on any later failure; never retry create or free inventory
+      // merely because this request cannot confirm session creation/linkage.
+      stripeCreateStarted = true;
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
         line_items: [
@@ -194,15 +204,20 @@ function registerPaymentRoutes(app, {
         metadata,
       });
 
-      db.run(`UPDATE booking_holds SET stripe_session_id = ? WHERE id = ?`, [
-        session.id,
-        holdId,
-      ]);
+      await bookingService.linkHoldSession(holdId, session.id);
       res.json({ id: session.id, url: session.url, pricing });
     } catch (error) {
-      if (holdId) bookingService.releaseHold(holdId);
-      console.error("Stripe error:", error);
-      res.status(500).json({ error: error.message });
+      if (holdId && !stripeCreateStarted) {
+        try {
+          await bookingService.releaseHold(holdId);
+        } catch {
+          console.error("Failed to release checkout hold; retained until expiry.");
+        }
+      }
+      // The 35-minute hold outlives the session's fixed 30-minute expiry. A
+      // successful/expired Stripe webhook can still reconcile it by metadata.
+      console.error("Checkout could not complete:", error.code || "CHECKOUT_FAILED");
+      res.status(503).json({ error: "Checkout could not be completed. Please try again shortly." });
     }
   });
 
@@ -232,29 +247,16 @@ function registerPaymentRoutes(app, {
       }
       const rentalType = meta.rental_type || "short_stay";
       const guests = parseInt(meta.guests, 10) || 2;
-      const sql = `INSERT OR IGNORE INTO bookings (checkIn, checkOut, bookingStatus, stripePaymentId, rental_type, guests) VALUES (?, ?, ?, ?, ?, ?)`;
-      const params = [
+      const result = await bookingService.recordConfirmedBooking({
+        checkIn, checkOut, sessionId: session.id, rentalType, guests,
+      });
+      await bookingService.confirmHold(meta.hold_id, session.id);
+      broadcastAdminUpdate();
+      res.status(201).json({
+        message: "Booking created successfully",
+        bookingId: result.lastID,
         checkIn,
         checkOut,
-        "confirmed",
-        session.id,
-        rentalType,
-        guests,
-      ];
-
-      db.run(sql, params, function (err) {
-        if (err) {
-          console.error("Database error:", err);
-          return res.status(500).json({ error: err.message });
-        }
-        if (this.changes > 0) broadcastAdminUpdate();
-        bookingService.confirmHold(meta.hold_id, session.id);
-        res.status(201).json({
-          message: "Booking created successfully",
-          bookingId: this.lastID,
-          checkIn,
-          checkOut,
-        });
       });
     } catch (error) {
       console.error("Booking creation error:", error);
