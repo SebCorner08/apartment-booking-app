@@ -506,9 +506,10 @@ test("mock checkout awaits linkage and catches a failed release without publishi
   assert.equal((await get(db, "SELECT status FROM booking_holds")).status, "active");
 });
 
-test("booking confirmation waits for hold persistence, fails visibly, and remains idempotent on retry", async (t) => {
+test("booking confirmation waits for hold persistence and notifies on idempotent recovery", async (t) => {
   const { db } = await fixture(t);
-  const ctx = checkoutContext(db, { mockPayments: true });
+  let broadcasts = 0;
+  const ctx = checkoutContext(db, { mockPayments: true, broadcastAdminUpdate: () => { broadcasts++; } });
   await ctx.start();
   const sessionId = ctx.res.body.id;
   assert.ok(sessionId, "mock checkout must link durably before exposing its session");
@@ -516,12 +517,19 @@ test("booking confirmation waits for hold persistence, fails visibly, and remain
   const first = response();
   await ctx.app.handlers["POST /api/bookings"]({ body: { sessionId } }, first);
   assert.equal(first.statusCode, 500);
+  assert.equal(broadcasts, 0, "failed confirmation must not broadcast success");
+  assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = ?", [sessionId])).count, 1);
   assert.equal((await get(db, "SELECT status FROM booking_holds WHERE stripe_session_id = ?", [sessionId])).status, "active");
   await run(db, "DROP TRIGGER fail_confirm");
   const retry = response();
   await ctx.app.handlers["POST /api/bookings"]({ body: { sessionId } }, retry);
   assert.equal(retry.statusCode, 201);
+  assert.equal(broadcasts, 1, "successful recovery must notify even when the booking already exists");
   assert.equal((await get(db, "SELECT status FROM booking_holds WHERE stripe_session_id = ?", [sessionId])).status, "confirmed");
+  const duplicate = response();
+  await ctx.app.handlers["POST /api/bookings"]({ body: { sessionId } }, duplicate);
+  assert.equal(duplicate.statusCode, 201);
+  assert.equal(broadcasts, 2, "duplicate confirmation may safely refresh the admin view");
   assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = ?", [sessionId])).count, 1);
 });
 

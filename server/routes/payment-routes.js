@@ -251,7 +251,7 @@ function registerPaymentRoutes(app, {
         checkIn, checkOut, sessionId: session.id, rentalType, guests,
       });
       await bookingService.confirmHold(meta.hold_id, session.id);
-      if (result.changes > 0) broadcastAdminUpdate();
+      broadcastAdminUpdate();
       res.status(201).json({
         message: "Booking created successfully",
         bookingId: result.lastID,
