@@ -1200,3 +1200,12 @@ span.flatpickr-weekday {
   font-size: 8px;
   font-weight: bold;
 }
+
+/* Weekly booking controls */
+.rental-type-btn[hidden], #weekly-stay-help[hidden], #confirm-cleaning-row[hidden] { display: none; }
+.rental-type-toggle { flex-wrap: wrap; }
+.rental-type-btn { min-width: 120px; }
+#weekly-stay-help { font-size: .85rem; color: #46616c; }
+
+/* Render a successful quote; empty and rejected quotes remain hidden. */
+.price-display:not(:empty) { display: block; }

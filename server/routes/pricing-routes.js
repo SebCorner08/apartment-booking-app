@@ -9,6 +9,8 @@ function registerPricingRoutes(app, {
     validateRequiredTaxUpdate,
     calculateTotalPrice,
     calculateMonthlyPrice,
+    calculateWeeklyPrice,
+    weeklyDuration,
     loadRatesFromDB,
     loadTaxSettingsFromDB,
     savePricingSettings,
@@ -35,6 +37,19 @@ function registerPricingRoutes(app, {
         return res.json(
           calculateMonthlyPrice(monthsInt, rates.monthly_rate, rates),
         );
+      }
+
+      if (rental_type === "weekly") {
+        if (rates.weekly_rate <= 0) {
+          return res.status(400).json({ error: "Weekly rentals are not currently available" });
+        }
+        const duration = weeklyDuration(checkIn, checkOut);
+        if (!duration) {
+          return res.status(400).json({ error: "Weekly stays must be 1–52 whole weeks (7 nights per week) with valid dates" });
+        }
+        return res.json(calculateWeeklyPrice(
+          duration.weeks, rates.weekly_rate, rates.cleaning_fee, rates,
+        ));
       }
 
       const nights = bookingService.nightsBetween(checkIn, checkOut);
@@ -73,6 +88,16 @@ function registerPricingRoutes(app, {
       res.json({ monthly_rate: rates.monthly_rate });
     } catch (err) {
       console.error("Error loading monthly rate:", err);
+      res.status(503).json({ error: "Pricing configuration unavailable" });
+    }
+  });
+
+  app.get("/api/weekly-rate", async (req, res) => {
+    try {
+      const rates = await loadRatesFromDB();
+      res.json({ weekly_rate: rates.weekly_rate, available: rates.weekly_rate > 0 });
+    } catch (err) {
+      console.error("Error loading weekly rate:", err);
       res.status(503).json({ error: "Pricing configuration unavailable" });
     }
   });

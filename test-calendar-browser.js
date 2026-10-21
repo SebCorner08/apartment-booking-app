@@ -10,7 +10,7 @@ function element(value = "") {
 }
 function harness() {
   const elements = new Map();
-  const ids = ["booking-form", "booking-message", "price-display", "confirm-modal", "confirm-cancel", "confirm-accept", "short-stay-fields", "monthly-fields", "monthly-start", "monthly-duration", "guests"];
+  const ids = ["booking-form", "booking-message", "price-display", "confirm-modal", "confirm-cancel", "confirm-accept", "short-stay-fields", "monthly-fields", "monthly-start", "monthly-duration", "guests", "weekly-stay-help"];
   for (const id of ids) elements.set(id, element());
   const monthly = element(); monthly.dataset = { type: "monthly" };
   const short = element(); short.dataset = { type: "short_stay" };
