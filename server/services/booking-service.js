@@ -48,8 +48,8 @@ function createBookingService({ db, holdMinutes }) {
     );
   }
 
-  // Hold writes must share createHold's queue: a callback on this connection
-  // alone does not prove durability if it ran inside another hold's transaction.
+  // Serialize hold-related writes so their order stays deterministic. Hold
+  // creation is a single atomic statement; no transaction is left open here.
   let holdQueue = Promise.resolve();
   function queueHoldWrite(operation) {
     const result = holdQueue.then(operation, operation);
@@ -102,59 +102,37 @@ function createBookingService({ db, holdMinutes }) {
   }
 
   function createHold({ checkIn, checkOut, rentalType }) {
-    const run = () =>
-      new Promise((resolve, reject) => {
-        const holdId = crypto.randomUUID();
-        const expiresAt = new Date(Date.now() + holdMinutes * 60 * 1000)
-          .toISOString()
-          .slice(0, 19)
-          .replace("T", " ");
-
-        function rollback(error, result = null) {
-          // Finish our transaction before the next queued hold can start.
-          db.run("ROLLBACK", (rollbackErr) => {
-            if (error || rollbackErr) return reject(error || rollbackErr);
-            resolve(result);
-          });
-        }
-
-        db.serialize(() => {
-          db.run("BEGIN IMMEDIATE TRANSACTION", (beginErr) => {
-            // An independent calendar import can hold SQLite's write lock longer
-            // than busyTimeout. Never query/rollback a transaction we did not open.
-            if (beginErr) return reject(beginErr);
-            db.all(
-              `SELECT checkIn, checkOut FROM bookings WHERE bookingStatus = 'confirmed'
-               UNION ALL
-               SELECT checkIn, checkOut FROM external_blocks
-               UNION ALL
-               SELECT checkIn, checkOut FROM booking_holds
-               WHERE status = 'active' AND expires_at > datetime('now')`,
-              [],
-              (err, rows) => {
-                if (err) return rollback(err);
-                const hasOverlap = rows.some(
-                  (row) => checkIn < row.checkOut && checkOut > row.checkIn,
-                );
-                if (hasOverlap) return rollback(null);
-                db.run(
-                  `INSERT INTO booking_holds (id, checkIn, checkOut, rental_type, expires_at) VALUES (?, ?, ?, ?, ?)`,
-                  [holdId, checkIn, checkOut, rentalType, expiresAt],
-                  (insertErr) => {
-                    if (insertErr) return rollback(insertErr);
-                    db.run("COMMIT", (commitErr) => {
-                      if (commitErr) return rollback(commitErr);
-                      resolve(holdId);
-                    });
-                  },
-                );
-              },
-            );
-          });
-        });
-      });
-
-    return queueHoldWrite(run);
+    // The overlap check and the insert are ONE SQLite statement, so they are
+    // atomic without opening a transaction on the shared connection. A
+    // BEGIN/ROLLBACK here could interleave with a Stripe webhook write on the
+    // same connection and roll back an already-acknowledged paid booking.
+    return queueHoldWrite(async () => {
+      const holdId = crypto.randomUUID();
+      const expiresAt = new Date(Date.now() + holdMinutes * 60 * 1000)
+        .toISOString()
+        .slice(0, 19)
+        .replace("T", " ");
+      const result = await runWithBusyRetry(
+        db,
+        `INSERT INTO booking_holds (id, checkIn, checkOut, rental_type, expires_at)
+         SELECT ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM bookings
+           WHERE bookingStatus = 'confirmed' AND ? < checkOut AND ? > checkIn
+         ) AND NOT EXISTS (
+           SELECT 1 FROM external_blocks WHERE ? < checkOut AND ? > checkIn
+         ) AND NOT EXISTS (
+           SELECT 1 FROM booking_holds
+           WHERE status = 'active' AND expires_at > datetime('now')
+             AND ? < checkOut AND ? > checkIn
+         )`,
+        [
+          holdId, checkIn, checkOut, rentalType, expiresAt,
+          checkIn, checkOut, checkIn, checkOut, checkIn, checkOut,
+        ],
+      );
+      return result.changes === 1 ? holdId : null;
+    });
   }
 
   return {

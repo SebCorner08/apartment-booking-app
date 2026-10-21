@@ -232,7 +232,7 @@ test("a long import lock rejects a concurrent hold safely, then retry sees commi
   assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = 'cs_lock_retry'")).count, 1);
   assert.equal(await booking.createHold(args), null);
   const free = await booking.createHold({ ...args, checkIn: "2027-04-01", checkOut: "2027-04-05" });
-  assert.ok(free, "hold queue must recover after failed BEGIN and overlap rollback");
+  assert.ok(free, "hold creation must recover after a lock rejection and an overlap");
 });
 
 function routes() {
@@ -533,35 +533,53 @@ test("booking confirmation waits for hold persistence and notifies on idempotent
   assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = ?", [sessionId])).count, 1);
 });
 
-test("session linkage and confirmed booking insert cannot join another hold's rolled-back transaction", async (t) => {
+test("a paid webhook interleaved with an overlapping hold request stays durable", async (t) => {
   const { db } = await fixture(t);
   const booking = createBookingService({ db, holdMinutes: 35 });
-  const first = await booking.createHold({ checkIn: "2027-07-01", checkOut: "2027-07-05", rentalType: "short_stay" });
-  const entered = deferred(), release = deferred();
+  const args = { checkIn: "2027-07-01", checkOut: "2027-07-05", rentalType: "short_stay" };
   const original = db.run.bind(db);
-  let failCommit = true;
-  db.run = (sql, params, callback) => {
-    if (sql === "COMMIT" && failCommit) {
-      failCommit = false;
-      entered.resolve();
-      release.promise.then(() => (typeof params === "function" ? params : callback)(new Error("injected commit failure")));
-      return db;
+  let webhookResponse = null;
+  let webhookDone = null;
+  // Start the paid webhook on the same connection the instant the hold request
+  // issues its first write statement, i.e. the worst-case interleaving.
+  db.run = (sql, ...rest) => {
+    const returned = original(sql, ...rest);
+    if (!webhookDone && /BEGIN|INSERT INTO booking_holds/.test(sql)) {
+      webhookResponse = response();
+      webhookDone = handleStripeWebhookRequest({
+        db, res: webhookResponse, req: { body: Buffer.from("fixture"), headers: { "stripe-signature": "fixture" } },
+        stripe: { webhooks: { constructEvent: () => ({ type: "checkout.session.completed", data: { object: {
+          id: "cs_interleaved", payment_status: "paid", metadata: { checkIn: "2027-07-01", checkOut: "2027-07-05" },
+        } } }) } },
+        webhookSecret: "fixture", broadcastAdminUpdate: () => {}, logger: { error() {} },
+      });
     }
-    return callback === undefined ? original(sql, params) : original(sql, params, callback);
+    return returned;
   };
-  const other = assert.rejects(booking.createHold({ checkIn: "2027-08-01", checkOut: "2027-08-05", rentalType: "short_stay" }));
-  await entered.promise;
-  let linked = false, recorded = false;
-  const linking = booking.linkHoldSession(first, "cs_queued").then(() => { linked = true; });
-  const recording = booking.recordConfirmedBooking({ checkIn: "2027-09-01", checkOut: "2027-09-05", sessionId: "cs_booking", rentalType: "short_stay", guests: 2 }).then(() => { recorded = true; });
-  await new Promise(setImmediate);
-  assert.equal(linked, false);
-  assert.equal(recorded, false);
-  release.resolve();
-  await other;
-  await linking;
-  await recording;
-  assert.equal((await get(db, "SELECT stripe_session_id FROM booking_holds WHERE id = ?", [first])).stripe_session_id, "cs_queued");
-  assert.equal((await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = 'cs_booking'")).count, 1);
-  assert.equal((await get(db, "SELECT COUNT(*) AS count FROM booking_holds WHERE checkIn = '2027-08-01'")).count, 0);
+  const holdResult = await booking.createHold(args);
+  await webhookDone;
+  db.run = original;
+  assert.equal(webhookResponse.statusCode, 200);
+  assert.equal(
+    (await get(db, "SELECT COUNT(*) AS count FROM bookings WHERE stripePaymentId = 'cs_interleaved' AND bookingStatus = 'confirmed'")).count,
+    1,
+    "an acknowledged paid booking must never be rolled back by a hold request",
+  );
+  assert.ok(holdResult === null || typeof holdResult === "string");
+  assert.equal(await booking.createHold(args), null, "the paid dates must now be unavailable");
+});
+
+test("hold creation leaves no transaction open and rejects overlaps atomically", async (t) => {
+  const { db } = await fixture(t);
+  const booking = createBookingService({ db, holdMinutes: 35 });
+  const first = await booking.createHold({ checkIn: "2027-08-01", checkOut: "2027-08-05", rentalType: "short_stay" });
+  assert.ok(first);
+  const [a, b] = await Promise.all([
+    booking.createHold({ checkIn: "2027-08-04", checkOut: "2027-08-08", rentalType: "short_stay" }),
+    booking.createHold({ checkIn: "2027-08-05", checkOut: "2027-08-08", rentalType: "short_stay" }),
+  ]);
+  assert.equal(a, null, "overlap with an active hold must be rejected");
+  assert.ok(b, "back-to-back dates remain bookable");
+  await run(db, "BEGIN IMMEDIATE");
+  await run(db, "ROLLBACK");
 });
