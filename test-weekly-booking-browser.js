@@ -39,6 +39,7 @@ function harness({ available = true } = {}) {
       addEventListener(type, cb) { if (type === "DOMContentLoaded") this.ready = cb; } },
     window: { location: { hostname: "example.test", href: "" } },
     localStorage: { setItem() {} }, console: { error() {} }, setInterval() {},
+    AbortController, setTimeout, clearTimeout,
     flatpickr: (id, options) => pickers[id] = { options, selectedDates: [], set() {}, clear() { this.selectedDates = []; } },
     fetch: async (url, opts = {}) => {
       const body = opts.body ? JSON.parse(opts.body) : null;

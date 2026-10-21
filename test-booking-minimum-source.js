@@ -2,10 +2,28 @@
 
 const assert = require("assert");
 const fs = require("fs");
+const vm = require("vm");
 
 const booking = fs.readFileSync("public/booking.js", "utf8");
 const indexHtml = fs.readFileSync("public/index.html", "utf8");
 const taxSettings = fs.readFileSync("public/tax-settings.html", "utf8");
+
+const taxSettingsScripts = [
+  ...taxSettings.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi),
+];
+assert(
+  taxSettingsScripts.length > 0,
+  "tax settings must include its admin behavior script",
+);
+for (const [index, script] of taxSettingsScripts.entries()) {
+  assert.doesNotThrow(
+    () =>
+      new vm.Script(script[1], {
+        filename: `public/tax-settings.html inline script ${index + 1}`,
+      }),
+    "tax settings inline scripts must parse before the admin page can run",
+  );
+}
 
 assert(
   !booking.includes("const MIN_NIGHTS"),
@@ -115,6 +133,25 @@ assert(
 assert(
   submitSource.includes("authoritativeMinimumNights = minimumNights"),
   "a successful save must advance the remembered server minimum for later Reset operations",
+);
+assert(
+  submitSource.includes('await fetch(`${API_URL}/api/admin/tax-settings`'),
+  "valid tax settings must be posted to the authenticated admin endpoint",
+);
+assert(
+  submitSource.includes('method: "POST"') &&
+    submitSource.includes('credentials: "include"'),
+  "saving tax settings must use POST and include the admin session cookie",
+);
+assert(
+  submitSource.includes("monthly_rate: parseFloat(monthlyRateInput.value)") &&
+    submitSource.includes("minimum_nights: minimumNights"),
+  "saving must send the edited monthly rate and validated minimum stay",
+);
+assert(
+  submitSource.includes("if (!response.ok)") &&
+    submitSource.includes('showMessage(error.message, "error")'),
+  "admin must display backend validation and save errors",
 );
 
 const resetEnd = taxSettings.indexOf(

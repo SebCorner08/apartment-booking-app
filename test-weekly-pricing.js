@@ -8,6 +8,7 @@ const sqlite3 = require("sqlite3").verbose();
 const express = require("express");
 const { createPricingService } = require("./server/services/pricing-service");
 const { createBookingService } = require("./server/services/booking-service");
+const { createCalendarService } = require("./server/services/calendar-service");
 const { registerPricingRoutes } = require("./server/routes/pricing-routes");
 const { registerPaymentRoutes } = require("./server/routes/payment-routes");
 const { processStripeEvent } = require("./server/stripe-webhook-persistence");
@@ -87,6 +88,16 @@ function addDays(days) {
     });
     const stripeCalls = [];
     const stripeSessions = new Map();
+    const emptyCalendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR";
+    const calendarState = { text: emptyCalendar, fail: false };
+    const calendarService = createCalendarService({
+      db, airbnbIcalUrl: "https://calendar.example.test/weekly-fixture",
+      fetchCalendar: async () => {
+        if (calendarState.fail) throw new Error("test-only calendar failure");
+        return { ok: true, text: async () => calendarState.text };
+      },
+      logger: { log() {}, error() {} },
+    });
     registerPaymentRoutes(app, {
       checkoutLimiter(req, res, next) { next(); }, mockPayments: false,
       stripe: { checkout: { sessions: {
@@ -101,6 +112,8 @@ function addDays(days) {
       } } },
       db, domain: "https://booking.example.test", maxGuests: 6, maxAdvanceMonths: 18,
       pricingService, bookingService, broadcastAdminUpdate() {},
+      airbnbIcalUrl: "https://calendar.example.test/weekly-fixture",
+      syncAirbnbCalendar: calendarService.syncAirbnbCalendar,
     });
     server = await new Promise((resolve) => {
       const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
@@ -166,6 +179,25 @@ function addDays(days) {
     assert.strictEqual(monthly.body.subtotal, 8200);
     assert.strictEqual(monthly.body.mecklenburg_occupancy_tax, 0);
 
+    // The integrated weekly path must retain #80's synchronization gate:
+    // neither a failed refresh nor newly imported overlapping dates may create
+    // a hold or a payable Stripe session.
+    calendarState.fail = true;
+    const unavailable = await request("/api/create-checkout-session", weekly);
+    assert.strictEqual(unavailable.status, 503);
+    assert.strictEqual(unavailable.body.code, "CALENDAR_UNAVAILABLE");
+    assert.strictEqual(stripeCalls.length, 0);
+    assert.strictEqual((await get(db, "SELECT COUNT(*) AS count FROM booking_holds")).count, 0);
+    calendarState.fail = false;
+    calendarState.text = ["BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT",
+      "UID:weekly-overlap", `DTSTART;VALUE=DATE:${weekly.checkIn.replaceAll("-", "")}`,
+      `DTEND;VALUE=DATE:${weekly.checkOut.replaceAll("-", "")}`,
+      "END:VEVENT", "END:VCALENDAR"].join("\r\n");
+    assert.strictEqual((await request("/api/create-checkout-session", weekly)).status, 409);
+    assert.strictEqual(stripeCalls.length, 0);
+    assert.strictEqual((await get(db, "SELECT COUNT(*) AS count FROM booking_holds")).count, 0);
+    calendarState.text = emptyCalendar;
+
     const checkout = await request("/api/create-checkout-session", tampered);
     assert.strictEqual(checkout.status, 200);
     assert.deepStrictEqual(checkout.body.pricing, quote.body);
@@ -207,6 +239,29 @@ function addDays(days) {
     ]);
     assert.deepStrictEqual(attempts.map((attempt) => attempt.status).sort(), [200, 409]);
 
+    // A payable weekly session can exist even if its durable linkage fails.
+    // Preserve its hold until webhook recovery instead of admitting overlap.
+    const linkageFailure = { ...weekly, checkIn: addDays(90), checkOut: addDays(97) };
+    await run(db, `CREATE TRIGGER fail_weekly_link BEFORE UPDATE OF stripe_session_id ON booking_holds
+      WHEN NEW.checkIn = '${linkageFailure.checkIn}' AND NEW.rental_type = 'weekly'
+      BEGIN SELECT RAISE(ABORT, 'test-only weekly linkage failure'); END`);
+    const callsBeforeFailure = stripeCalls.length;
+    assert.strictEqual((await request("/api/create-checkout-session", linkageFailure)).status, 503);
+    assert.strictEqual(stripeCalls.length, callsBeforeFailure + 1, "Stripe create is never retried");
+    const failedPayload = stripeCalls[callsBeforeFailure];
+    const retainedHold = await get(db, "SELECT status, stripe_session_id, rental_type FROM booking_holds WHERE id = ?",
+      [failedPayload.metadata.hold_id]);
+    assert.deepStrictEqual(retainedHold, { status: "active", stripe_session_id: null, rental_type: "weekly" });
+    assert.strictEqual((await request("/api/create-checkout-session", linkageFailure)).status, 409);
+    assert.strictEqual(stripeCalls.length, callsBeforeFailure + 1);
+    await run(db, "DROP TRIGGER fail_weekly_link");
+    const recoveredSession = stripeSessions.get(`cs_weekly_${callsBeforeFailure + 1}`);
+    await processStripeEvent({ db, event: { type: "checkout.session.completed", data: { object: recoveredSession } } });
+    assert.strictEqual((await get(db, "SELECT status FROM booking_holds WHERE id = ?",
+      [failedPayload.metadata.hold_id])).status, "confirmed");
+    assert.strictEqual((await get(db, "SELECT rental_type FROM bookings WHERE stripePaymentId = ?",
+      [recoveredSession.id])).rental_type, "weekly");
+
     await request("/api/admin/tax-settings", { ...settings, weekly_rate: 0 }, true);
     assert.strictEqual((await request("/api/calculate-price", weekly)).status, 400, "owner can disable weekly pricing");
     await request("/api/admin/tax-settings", { ...settings, weekly_rate: 1650.5 }, true);
@@ -224,7 +279,7 @@ function addDays(days) {
     db = await bootstrap();
     assert.strictEqual((await createPricingService(db).loadRatesFromDB()).weekly_rate, 0,
       "fresh databases also start with weekly rentals disabled");
-    console.log("PASS: weekly migration, validation, admin persistence, pricing, Stripe amounts, booking replay and overlap");
+    console.log("PASS: weekly migration, validation, admin persistence, pricing, calendar gating, Stripe amounts/linkage recovery, booking replay and overlap");
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
     if (db) await closeDb(db);

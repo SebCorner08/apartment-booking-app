@@ -89,16 +89,24 @@ async function page({ failLoad = false } = {}) {
     const admin = await page();
     assert.equal(admin.element("save").disabled, false);
     admin.element("monthlyRate").value = "4000";
+    admin.element("weeklyRate").value = "1500.25";
     admin.element("minimumNights").value = "7";
     await admin.submit();
     const posts = admin.requests.filter(r => r.options.method === "POST");
     assert.equal(posts.length, 1, "Save must send an authenticated request");
     assert.equal(JSON.parse(posts[0].options.body).monthly_rate, 4000);
+    assert.equal(JSON.parse(posts[0].options.body).weekly_rate, 1500.25);
     assert.match(admin.element("message").textContent, /saved successfully/);
     const reloaded = await page();
     assert.equal(Number(reloaded.element("monthlyRate").value), 4000);
+    assert.equal(Number(reloaded.element("weeklyRate").value), 1500.25);
     assert.equal(Number(reloaded.element("minimumNights").value), 7);
 
+    admin.element("weeklyRate").value = "-1";
+    await admin.submit();
+    assert.match(admin.element("message").className, /error/);
+    assert.match(admin.element("message").textContent, /weekly_rate/);
+    admin.element("weeklyRate").value = "1500.25";
     admin.element("monthlyRate").value = "-1";
     await admin.submit();
     assert.match(admin.element("message").className, /error/);
@@ -116,12 +124,19 @@ async function page({ failLoad = false } = {}) {
     await start();
     const restarted = await page();
     assert.equal(Number(restarted.element("monthlyRate").value), 4000, "price survives server restart");
+    assert.equal(Number(restarted.element("weeklyRate").value), 1500.25, "weekly price survives server restart");
     const quote = await fetch(`${api}/api/calculate-price`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rental_type: "monthly", months: 2, monthly_rate: 1 }),
     });
     assert.equal(quote.status, 200);
     assert.equal((await quote.json()).subtotal, 8000, "public quote uses saved authoritative rate");
+    const weeklyQuote = await fetch(`${api}/api/calculate-price`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rental_type: "weekly", checkIn: "2027-01-04", checkOut: "2027-01-18", weekly_rate: 1 }),
+    });
+    assert.equal(weeklyQuote.status, 200);
+    assert.equal((await weeklyQuote.json()).subtotal, 3000.5, "weekly quote uses rate saved through admin page");
     console.log("PASS: admin Save, reload/restart persistence, validation, authentication and public quote");
   } finally {
     await stop();
